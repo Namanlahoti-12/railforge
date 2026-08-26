@@ -1319,55 +1319,80 @@ document.getElementById('route-save-btn')?.addEventListener('click', () => {
   train.stationStops = app._routeConfigStops.map(s => ({ ...s }));
   train.currentStopIndex = 0;
 
-  // Build the track route from station stops
+  if (train.stationStops.length < 1) {
+    app.notify('Add at least one station stop', 'warning');
+    return;
+  }
+
   if (train.stationStops.length >= 2) {
-    const route = pathFinder.buildStationRoute(train.stationStops, app.stations, app.tracks);
+    // v4: coordinate-based pathfinding with virtual station node injection
+    const { route, segmentMap } = pathFinder.buildStationRoute(
+      train.stationStops,
+      app.stations,
+      app.tracks
+    );
+
     if (route.length > 0) {
       train.route = route;
       train.routeIndex = 0;
-      train.currentTrackId = route[0];
-      train.running = true;
+      train.stationSegmentMap = Object.fromEntries(segmentMap); // persist for simulation engine
 
-      // Position train at the first station
-      const firstStation = app.stations.get(train.stationStops[0].stationId);
-      if (firstStation) {
+      // Snap train to first station's exact position on its track
+      const firstStop = train.stationStops[0];
+      const firstStation = app.stations.get(firstStop.stationId);
+      if (firstStation?.trackId) {
         const track = app.tracks.get(firstStation.trackId);
         if (track) {
           train.currentTrackId = firstStation.trackId;
           train.t = firstStation.trackT;
-          // Ensure the station's track is at the start of the route
-          if (route[0] !== firstStation.trackId) {
-            train.route = [firstStation.trackId, ...route];
-          }
-          train.routeIndex = 0;
+          train.direction = 1;
+          train.routeIndex = route.indexOf(firstStation.trackId);
+          if (train.routeIndex < 0) train.routeIndex = 0;
           train.updatePosition(track);
         }
+      } else {
+        // Fallback: start at beginning of route
+        train.currentTrackId = route[0];
+        train.t = 0;
+        train.direction = 1;
+        const firstTrack = app.tracks.get(route[0]);
+        if (firstTrack) train.updatePosition(firstTrack);
       }
 
-      app.notify(`Route set: ${route.length} track segments, ${train.stationStops.length} stops`, 'success');
+      train.running = true;
+      sendOp('update-train', train.toJSON());
+      document.getElementById('route-modal').classList.add('hidden');
+      updatePropertiesPanel();
+      app.notify(`🗺 Route set: ${route.length} segments across ${train.stationStops.length} stops`, 'success');
     } else {
-      app.notify('⚠ Could not find a connected path between those stations. Make sure tracks are connected!', 'warning');
+      app.notify(
+        '⚠ No connected path found. Ensure tracks between stations are linked end-to-end.',
+        'warning'
+      );
     }
-  } else if (train.stationStops.length === 1) {
-    // Single station — just set the train there
+    return;
+  }
+
+  // Single station stop — park train at that station
+  if (train.stationStops.length === 1) {
     const station = app.stations.get(train.stationStops[0].stationId);
-    if (station) {
+    if (station?.trackId) {
       const track = app.tracks.get(station.trackId);
       if (track) {
         train.currentTrackId = station.trackId;
         train.t = station.trackT;
+        train.direction = 1;
         train.updatePosition(track);
         const connected = pathFinder.getConnectedTracks(station.trackId, app.tracks);
         train.route = connected;
-        train.routeIndex = connected.indexOf(station.trackId);
+        train.routeIndex = Math.max(0, connected.indexOf(station.trackId));
       }
     }
+    sendOp('update-train', train.toJSON());
+    document.getElementById('route-modal').classList.add('hidden');
+    updatePropertiesPanel();
+    app.notify('Train placed at station', 'success');
   }
-
-  sendOp('update-train', train.toJSON());
-  document.getElementById('route-modal').classList.add('hidden');
-  updatePropertiesPanel();
-  app.notify(`Route configured: ${train.stationStops.length} stops`, 'success');
 });
 
 document.getElementById('route-clear-btn')?.addEventListener('click', () => {

@@ -50,6 +50,9 @@ export class Train {
     // ── Platform assignment ──
     this.assignedPlatform = data.assignedPlatform ?? null;
 
+    // ── Station→RouteIndex map (v4) ──
+    this.stationSegmentMap = data.stationSegmentMap || {};
+
     // Headlight flicker
     this._headlightPhase = Math.random() * Math.PI * 2;
   }
@@ -71,6 +74,7 @@ export class Train {
       dwelling: this.dwelling,
       dwellTimeRemaining: this.dwellTimeRemaining,
       assignedPlatform: this.assignedPlatform,
+      stationSegmentMap: { ...this.stationSegmentMap },
     };
   }
 
