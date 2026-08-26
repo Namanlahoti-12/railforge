@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RailForge — Collaborative Railway Simulator</title>
+  <meta name="description" content="Build railway track networks, place stations, and simulate trains in real-time — collaboratively with friends." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚂</text></svg>" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles/index.css" />
+</head>
+<body>
+
+  <!-- ═══════ Room Modal ═══════ -->
+  <div id="room-modal" class="modal-overlay">
+    <div class="modal-card glass-panel">
+      <div class="modal-logo">
+        <span class="modal-logo-icon">🚂</span>
+        <h1>RailForge</h1>
+        <p class="modal-subtitle">Collaborative Railway Simulator</p>
+      </div>
+
+      <div class="modal-body">
+        <label class="input-group">
+          <span class="material-icons-round">person</span>
+          <input id="user-name-input" type="text" placeholder="Your display name" maxlength="20" autocomplete="off" />
+        </label>
+
+        <div class="modal-section">
+          <button id="create-room-btn" class="btn btn-primary btn-lg">
+            <span class="material-icons-round">add_circle</span>
+            Create New Room
+          </button>
+        </div>
+
+        <div class="modal-divider"><span>or join existing</span></div>
+
+        <div class="modal-section modal-join">
+          <label class="input-group">
+            <span class="material-icons-round">meeting_room</span>
+            <input id="room-code-input" type="text" placeholder="Enter room code" maxlength="6" autocomplete="off" style="text-transform:uppercase" />
+          </label>
+          <button id="join-room-btn" class="btn btn-secondary">
+            <span class="material-icons-round">login</span>
+            Join
+          </button>
+        </div>
+
+        <button id="solo-mode-btn" class="btn btn-ghost">
+          <span class="material-icons-round">person_outline</span>
+          Continue Solo (Offline)
+        </button>
+
+        <p id="modal-error" class="modal-error hidden"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ Top Bar ═══════ -->
+  <header id="top-bar" class="glass-panel">
+    <div class="top-bar-section top-bar-left">
+      <span class="logo"><span class="logo-icon">🚂</span> RailForge</span>
+      <div id="room-info" class="room-info hidden">
+        <span class="room-badge">
+          <span class="material-icons-round" style="font-size:14px">meeting_room</span>
+          <span id="room-code-display"></span>
+        </span>
+        <button id="copy-room-code" class="icon-btn icon-btn-sm" title="Copy room code">
+          <span class="material-icons-round">content_copy</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="top-bar-section top-bar-center">
+      <div class="sim-controls">
+        <button id="sim-play-btn" class="icon-btn" title="Play simulation (Space)">
+          <span class="material-icons-round">play_arrow</span>
+        </button>
+        <button id="sim-pause-btn" class="icon-btn hidden" title="Pause simulation (Space)">
+          <span class="material-icons-round">pause</span>
+        </button>
+        <button id="sim-stop-btn" class="icon-btn" title="Reset simulation">
+          <span class="material-icons-round">stop</span>
+        </button>
+        <div class="sim-speed-control">
+          <span class="sim-speed-label-text">Speed</span>
+          <input id="sim-speed-slider" type="range" min="0.25" max="4" step="0.25" value="1" />
+          <span id="sim-speed-value">1×</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="top-bar-section top-bar-right">
+      <div id="connected-users" class="user-avatars"></div>
+      <button id="help-btn" class="icon-btn" title="Keyboard shortcuts">
+        <span class="material-icons-round">help_outline</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ═══════ Left Toolbar ═══════ -->
+  <aside id="toolbar" class="glass-panel">
+    <div class="tool-group">
+      <button class="tool-btn active" data-tool="select" title="Select (V)">
+        <span class="material-icons-round">near_me</span>
+        <span class="tool-label">Select</span>
+      </button>
+      <button class="tool-btn" data-tool="pan" title="Pan (H)">
+        <span class="material-icons-round">pan_tool</span>
+        <span class="tool-label">Pan</span>
+      </button>
+    </div>
+    <div class="tool-separator"></div>
+    <div class="tool-group">
+      <button class="tool-btn" data-tool="straight-track" title="Straight Track (T)">
+        <span class="material-icons-round">horizontal_rule</span>
+        <span class="tool-label">Straight</span>
+      </button>
+      <button class="tool-btn" data-tool="curved-track" title="Curved Track (C)">
+        <span class="material-icons-round">turn_right</span>
+        <span class="tool-label">Curve</span>
+      </button>
+    </div>
+    <div class="tool-separator"></div>
+    <div class="tool-group">
+      <button class="tool-btn" data-tool="station" title="Station (S)">
+        <span class="material-icons-round">apartment</span>
+        <span class="tool-label">Station</span>
+      </button>
+      <button class="tool-btn" data-tool="train" title="Train (R)">
+        <span class="material-icons-round">train</span>
+        <span class="tool-label">Train</span>
+      </button>
+      <button class="tool-btn" data-tool="signal" title="Signal (G)">
+        <span class="material-icons-round">traffic</span>
+        <span class="tool-label">Signal</span>
+      </button>
+    </div>
+    <div class="tool-separator"></div>
+    <div class="tool-group">
+      <button class="tool-btn" data-tool="eraser" title="Eraser (E)">
+        <span class="material-icons-round">delete_outline</span>
+        <span class="tool-label">Eraser</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ═══════ Canvas ═══════ -->
+  <main id="canvas-container">
+    <canvas id="main-canvas"></canvas>
+    <!-- Ghost preview layer -->
+    <div id="track-preview-hint" class="preview-hint hidden">Click to place start point</div>
+  </main>
+
+  <!-- ═══════ Properties Panel ═══════ -->
+  <aside id="properties-panel" class="glass-panel hidden">
+    <div class="panel-header">
+      <h3 id="properties-title">Properties</h3>
+      <button id="close-properties" class="icon-btn icon-btn-sm">
+        <span class="material-icons-round">close</span>
+      </button>
+    </div>
+    <div id="properties-content" class="panel-content"></div>
+  </aside>
+
+  <!-- ═══════ Bottom Bar ═══════ -->
+  <footer id="bottom-bar" class="glass-panel">
+    <div class="bottom-section bottom-left">
+      <button id="zoom-out-btn" class="icon-btn icon-btn-sm" title="Zoom out (-)">
+        <span class="material-icons-round">remove</span>
+      </button>
+      <span id="zoom-level" class="zoom-display">100%</span>
+      <button id="zoom-in-btn" class="icon-btn icon-btn-sm" title="Zoom in (+)">
+        <span class="material-icons-round">add</span>
+      </button>
+      <button id="zoom-fit-btn" class="icon-btn icon-btn-sm" title="Fit to view">
+        <span class="material-icons-round">fit_screen</span>
+      </button>
+    </div>
+    <div class="bottom-section bottom-center">
+      <span id="cursor-coords" class="coords-display">X: 0 &nbsp; Y: 0</span>
+    </div>
+    <div class="bottom-section bottom-right">
+      <button id="toggle-grid-btn" class="icon-btn icon-btn-sm active" title="Toggle grid (Ctrl+G)">
+        <span class="material-icons-round">grid_on</span>
+      </button>
+      <button id="toggle-snap-btn" class="icon-btn icon-btn-sm active" title="Toggle snap (Ctrl+S)">
+        <span class="material-icons-round">grid_3x3</span>
+      </button>
+    </div>
+  </footer>
+
+  <!-- ═══════ Minimap ═══════ -->
+  <div id="minimap" class="glass-panel">
+    <canvas id="minimap-canvas" width="200" height="140"></canvas>
+  </div>
+
+  <!-- ═══════ Notification Container ═══════ -->
+  <div id="notifications"></div>
+
+  <!-- ═══════ Help Modal ═══════ -->
+  <div id="help-modal" class="modal-overlay hidden">
+    <div class="modal-card glass-panel modal-help">
+      <div class="panel-header">
+        <h3>Keyboard Shortcuts</h3>
+        <button id="close-help" class="icon-btn icon-btn-sm">
+          <span class="material-icons-round">close</span>
+        </button>
+      </div>
+      <div class="panel-content shortcuts-grid">
+        <div class="shortcut"><kbd>V</kbd> <span>Select tool</span></div>
+        <div class="shortcut"><kbd>H</kbd> <span>Pan tool</span></div>
+        <div class="shortcut"><kbd>T</kbd> <span>Straight track</span></div>
+        <div class="shortcut"><kbd>C</kbd> <span>Curved track</span></div>
+        <div class="shortcut"><kbd>S</kbd> <span>Station</span></div>
+        <div class="shortcut"><kbd>R</kbd> <span>Train</span></div>
+        <div class="shortcut"><kbd>G</kbd> <span>Signal</span></div>
+        <div class="shortcut"><kbd>E</kbd> <span>Eraser</span></div>
+        <div class="shortcut"><kbd>Space</kbd> <span>Play / Pause</span></div>
+        <div class="shortcut"><kbd>Del</kbd> <span>Delete selected</span></div>
+        <div class="shortcut"><kbd>Ctrl+Z</kbd> <span>Undo</span></div>
+        <div class="shortcut"><kbd>Scroll</kbd> <span>Zoom in / out</span></div>
+        <div class="shortcut"><kbd>Middle Drag</kbd> <span>Pan canvas</span></div>
+        <div class="shortcut"><kbd>Ctrl+G</kbd> <span>Toggle grid</span></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

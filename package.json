@@ -1,0 +1,23 @@
+{
+  "name": "railforge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"node server.js\" \"npx vite --config vite.config.js\"",
+    "start": "node server.js",
+    "build": "npx vite build --config vite.config.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "socket.io": "^4.7.5",
+    "socket.io-client": "^4.7.5",
+    "vite": "^5.4.2"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}
