@@ -1,5 +1,6 @@
 /**
  * Signal — data model and rendering for railway signals.
+ * v2: Added manual override toggle with lock indicator.
  */
 export class Signal {
   constructor(data = {}) {
@@ -9,7 +10,8 @@ export class Signal {
     this.trackId = data.trackId || null;
     this.trackT = data.trackT ?? 0.5;
     this.state = data.state || 'green'; // 'red' | 'yellow' | 'green'
-    this.autoManage = data.autoManage ?? true; // auto-switch based on trains
+    this.autoManage = data.autoManage ?? true;
+    this.manualOverride = data.manualOverride ?? false;
   }
 
   toJSON() {
@@ -17,7 +19,21 @@ export class Signal {
       id: this.id, x: this.x, y: this.y,
       trackId: this.trackId, trackT: this.trackT,
       state: this.state, autoManage: this.autoManage,
+      manualOverride: this.manualOverride,
     };
+  }
+
+  /** Toggle signal state manually (green ↔ red) */
+  toggleManual() {
+    this.manualOverride = true;
+    this.autoManage = false;
+    this.state = this.state === 'red' ? 'green' : 'red';
+  }
+
+  /** Clear manual override and return to auto */
+  clearOverride() {
+    this.manualOverride = false;
+    this.autoManage = true;
   }
 
   /** Update position from associated track */
@@ -65,8 +81,10 @@ export class Signal {
     }
 
     ctx.fillStyle = '#1a2140';
-    ctx.strokeStyle = isSelected ? '#4e8cff' : isHover ? '#7c5cfc' : '#3a4560';
-    ctx.lineWidth = 1 / zoom;
+    ctx.strokeStyle = isSelected ? '#4e8cff' 
+                    : isHover ? '#7c5cfc' 
+                    : this.manualOverride ? '#eab308' : '#3a4560';
+    ctx.lineWidth = this.manualOverride ? 1.5 / zoom : 1 / zoom;
     ctx.beginPath();
     ctx.roundRect(hx - hw/2, hy - hh/2, hw, hh, 3);
     ctx.fill();
@@ -86,7 +104,6 @@ export class Signal {
       const r = 2.5;
 
       if (light.active) {
-        // Active glow
         ctx.shadowColor = light.color;
         ctx.shadowBlur = 12 / zoom;
         ctx.fillStyle = light.color;
@@ -94,7 +111,6 @@ export class Signal {
         ctx.arc(hx, light.cy, r, 0, Math.PI * 2);
         ctx.fill();
 
-        // Bright core
         ctx.shadowBlur = 0;
         ctx.shadowColor = 'transparent';
         ctx.fillStyle = 'rgba(255,255,255,0.4)';
@@ -102,12 +118,21 @@ export class Signal {
         ctx.arc(hx, light.cy, r * 0.5, 0, Math.PI * 2);
         ctx.fill();
       } else {
-        // Inactive dim
         ctx.fillStyle = 'rgba(255,255,255,0.06)';
         ctx.beginPath();
         ctx.arc(hx, light.cy, r, 0, Math.PI * 2);
         ctx.fill();
       }
+    }
+
+    // Manual override lock icon
+    if (this.manualOverride && zoom > 0.4) {
+      const fontSize = Math.max(8, 10 / Math.sqrt(zoom));
+      ctx.font = `${fontSize}px Inter, sans-serif`;
+      ctx.fillStyle = '#eab308';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('🔒', hx, hy - hh/2 - 3);
     }
 
     ctx.restore();

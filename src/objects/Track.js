@@ -1,6 +1,7 @@
 /**
  * Track — data model and rendering for a track segment.
- * Supports straight lines and cubic bezier curves.
+ * Supports straight lines, cubic bezier curves, and track classifications.
+ * v2: Added drag handles, track classes (mainline/siding/junction/crossover).
  */
 
 const TRACK_COLORS = {
@@ -8,12 +9,22 @@ const TRACK_COLORS = {
   hover: '#7c5cfc',
   selected: '#4e8cff',
   building: 'rgba(78, 140, 255, 0.5)',
+  siding: '#5a6a80',
+  crossover: '#b87333',
+};
+
+const HANDLE_RADIUS = 6;
+const HANDLE_COLORS = {
+  endpoint: '#4e8cff',
+  controlPoint: '#eab308',
+  hover: '#ffffff',
 };
 
 export class Track {
   constructor(data = {}) {
     this.id = data.id || crypto.randomUUID();
     this.type = data.type || 'straight'; // 'straight' | 'curve'
+    this.trackClass = data.trackClass || 'mainline'; // 'mainline' | 'siding' | 'crossover'
     this.start = data.start || { x: 0, y: 0 };
     this.end = data.end || { x: 0, y: 0 };
     this.cp1 = data.cp1 || null; // control point 1 (for curves)
@@ -26,7 +37,7 @@ export class Track {
   /** Serialize to plain object */
   toJSON() {
     return {
-      id: this.id, type: this.type,
+      id: this.id, type: this.type, trackClass: this.trackClass,
       start: { ...this.start }, end: { ...this.end },
       cp1: this.cp1 ? { ...this.cp1 } : null,
       cp2: this.cp2 ? { ...this.cp2 } : null,
@@ -117,6 +128,39 @@ export class Track {
     return bestT;
   }
 
+  /** Hit-test a drag handle. Returns handle name or null. */
+  hitTestHandle(wx, wy, zoom = 1) {
+    const r = (HANDLE_RADIUS + 4) / zoom;
+    const rSq = r * r;
+
+    const dStart = (wx - this.start.x)**2 + (wy - this.start.y)**2;
+    if (dStart < rSq) return 'start';
+
+    const dEnd = (wx - this.end.x)**2 + (wy - this.end.y)**2;
+    if (dEnd < rSq) return 'end';
+
+    if (this.type === 'curve') {
+      const cp1 = this.cp1 || this._autoCP1();
+      const cp2 = this.cp2 || this._autoCP2();
+      const dCP1 = (wx - cp1.x)**2 + (wy - cp1.y)**2;
+      if (dCP1 < rSq) return 'cp1';
+      const dCP2 = (wx - cp2.x)**2 + (wy - cp2.y)**2;
+      if (dCP2 < rSq) return 'cp2';
+    }
+
+    return null;
+  }
+
+  /** Move a handle to a new position */
+  moveHandle(handleName, x, y) {
+    switch (handleName) {
+      case 'start': this.start = { x, y }; break;
+      case 'end': this.end = { x, y }; break;
+      case 'cp1': this.cp1 = { x, y }; break;
+      case 'cp2': this.cp2 = { x, y }; break;
+    }
+  }
+
   /** Auto control point 1 */
   _autoCP1() {
     const dx = this.end.x - this.start.x;
@@ -134,21 +178,26 @@ export class Track {
   /** Render this track on a canvas context */
   render(ctx, camera, state = 'default') {
     const zoom = camera.zoom;
-    const railGauge = 6;       // half-distance between rails
-    const sleeperLen = 14;
-    const sleeperSpacing = 16;
+    const railGauge = 6;
+    const sleeperLen = this.trackClass === 'siding' ? 10 : 14;
+    const sleeperSpacing = this.trackClass === 'siding' ? 20 : 16;
 
-    const color = state === 'hover' ? TRACK_COLORS.hover
-                : state === 'selected' ? TRACK_COLORS.selected
-                : state === 'building' ? TRACK_COLORS.building
-                : TRACK_COLORS.default;
+    const isSiding = this.trackClass === 'siding';
+    const isCrossover = this.trackClass === 'crossover';
+
+    let color = state === 'hover' ? TRACK_COLORS.hover
+              : state === 'selected' ? TRACK_COLORS.selected
+              : state === 'building' ? TRACK_COLORS.building
+              : isSiding ? TRACK_COLORS.siding
+              : isCrossover ? TRACK_COLORS.crossover
+              : TRACK_COLORS.default;
 
     // Draw sleepers first
     const length = this.getLength();
     const numSleepers = Math.max(2, Math.floor(length / sleeperSpacing));
 
     ctx.save();
-    ctx.strokeStyle = '#3a4560';
+    ctx.strokeStyle = isSiding ? '#2a3450' : '#3a4560';
     ctx.lineWidth = Math.max(2, 3 / Math.sqrt(zoom));
     ctx.lineCap = 'round';
 
@@ -169,6 +218,11 @@ export class Track {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
+    // Siding uses dashed lines
+    if (isSiding) {
+      ctx.setLineDash([6 / zoom, 4 / zoom]);
+    }
+
     for (const sign of [-1, 1]) {
       ctx.beginPath();
       const steps = 50;
@@ -182,6 +236,25 @@ export class Track {
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+    }
+
+    ctx.setLineDash([]);
+
+    // Crossover X marks at quarter points
+    if (isCrossover) {
+      ctx.strokeStyle = TRACK_COLORS.crossover;
+      ctx.lineWidth = 2 / Math.sqrt(zoom);
+      for (const t of [0.25, 0.5, 0.75]) {
+        const p = this.getPointAt(t);
+        const n = this.getNormalAt(t);
+        const sz = 5;
+        ctx.beginPath();
+        ctx.moveTo(p.x - sz, p.y - sz);
+        ctx.lineTo(p.x + sz, p.y + sz);
+        ctx.moveTo(p.x + sz, p.y - sz);
+        ctx.lineTo(p.x - sz, p.y + sz);
+        ctx.stroke();
+      }
     }
 
     // Glow effect for selected/hover
@@ -219,6 +292,72 @@ export class Track {
       ctx.stroke();
     }
 
+    // Track class label for siding
+    if (isSiding && zoom > 0.6) {
+      const mid = this.getPointAt(0.5);
+      const fontSize = Math.max(7, 9 / Math.sqrt(zoom));
+      ctx.font = `500 ${fontSize}px Inter, sans-serif`;
+      ctx.fillStyle = 'rgba(90, 106, 128, 0.7)';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('SIDING', mid.x, mid.y - 10);
+    }
+
+    ctx.restore();
+  }
+
+  /** Render interactive drag handles (only when selected) */
+  renderHandles(ctx, camera, hoveredHandle = null) {
+    const zoom = camera.zoom;
+    const r = HANDLE_RADIUS / Math.sqrt(zoom);
+
+    const handles = [
+      { name: 'start', ...this.start, color: HANDLE_COLORS.endpoint },
+      { name: 'end', ...this.end, color: HANDLE_COLORS.endpoint },
+    ];
+
+    if (this.type === 'curve') {
+      const cp1 = this.cp1 || this._autoCP1();
+      const cp2 = this.cp2 || this._autoCP2();
+      handles.push(
+        { name: 'cp1', x: cp1.x, y: cp1.y, color: HANDLE_COLORS.controlPoint },
+        { name: 'cp2', x: cp2.x, y: cp2.y, color: HANDLE_COLORS.controlPoint },
+      );
+
+      // Draw dashed lines from endpoints to control points
+      ctx.save();
+      ctx.strokeStyle = 'rgba(234, 179, 8, 0.3)';
+      ctx.lineWidth = 1 / zoom;
+      ctx.setLineDash([4 / zoom, 4 / zoom]);
+      ctx.beginPath();
+      ctx.moveTo(this.start.x, this.start.y);
+      ctx.lineTo(cp1.x, cp1.y);
+      ctx.moveTo(this.end.x, this.end.y);
+      ctx.lineTo(cp2.x, cp2.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.save();
+    for (const h of handles) {
+      const isHovered = hoveredHandle === h.name;
+      const radius = isHovered ? r * 1.3 : r;
+
+      // Outer glow
+      ctx.fillStyle = isHovered ? 'rgba(255,255,255,0.15)' : 'rgba(78,140,255,0.08)';
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, radius + 4 / zoom, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Handle circle
+      ctx.fillStyle = isHovered ? HANDLE_COLORS.hover : h.color;
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = 1.5 / zoom;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
     ctx.restore();
   }
 

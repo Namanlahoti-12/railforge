@@ -1,11 +1,18 @@
 /**
  * Train — data model and rendering for a train moving along tracks.
+ * v2: Added stationStops routing, priority system, collision state, dwell timer.
  */
 
 const TRAIN_COLORS = [
   '#ef4444', '#f97316', '#eab308', '#22c55e',
   '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899',
 ];
+
+const PRIORITY_CONFIG = {
+  high:   { label: 'Express', badge: '⚡', color: '#ef4444', weight: 3 },
+  medium: { label: 'Regular', badge: '●',  color: '#eab308', weight: 2 },
+  low:    { label: 'Local',   badge: '▽',  color: '#22c55e', weight: 1 },
+};
 
 export class Train {
   constructor(data = {}) {
@@ -15,6 +22,7 @@ export class Train {
     this.currentTrackId = data.currentTrackId || null;
     this.t = data.t ?? 0;               // parametric position on current track [0,1]
     this.speed = data.speed ?? 60;       // world units per second
+    this._baseSpeed = data._baseSpeed ?? data.speed ?? 60;
     this.direction = data.direction ?? 1; // 1 = forward, -1 = reverse
     this.route = data.route || [];        // ordered array of track IDs
     this.routeIndex = data.routeIndex ?? 0;
@@ -24,6 +32,24 @@ export class Train {
     this.y = data.y ?? 0;
     this.angle = data.angle ?? 0;
 
+    // ── Station Routing (v2) ──
+    this.stationStops = data.stationStops || [];  // [{stationId, stationName}]
+    this.currentStopIndex = data.currentStopIndex ?? 0;
+
+    // ── Priority (v2) ──
+    this.priority = data.priority || 'medium'; // 'high' | 'medium' | 'low'
+
+    // ── Collision (v2) ──
+    this.collided = data.collided ?? false;
+    this.collidedWith = data.collidedWith || null;
+
+    // ── Dwell timer (v2) ──
+    this.dwelling = data.dwelling ?? false;
+    this.dwellTimeRemaining = data.dwellTimeRemaining ?? 0;
+
+    // ── Platform assignment ──
+    this.assignedPlatform = data.assignedPlatform ?? null;
+
     // Headlight flicker
     this._headlightPhase = Math.random() * Math.PI * 2;
   }
@@ -32,11 +58,33 @@ export class Train {
     return {
       id: this.id, name: this.name, color: this.color,
       currentTrackId: this.currentTrackId,
-      t: this.t, speed: this.speed, direction: this.direction,
+      t: this.t, speed: this.speed, _baseSpeed: this._baseSpeed,
+      direction: this.direction,
       route: [...this.route], routeIndex: this.routeIndex,
       running: this.running, carriages: this.carriages,
       x: this.x, y: this.y, angle: this.angle,
+      stationStops: this.stationStops.map(s => ({ ...s })),
+      currentStopIndex: this.currentStopIndex,
+      priority: this.priority,
+      collided: this.collided,
+      collidedWith: this.collidedWith,
+      dwelling: this.dwelling,
+      dwellTimeRemaining: this.dwellTimeRemaining,
+      assignedPlatform: this.assignedPlatform,
     };
+  }
+
+  /** Get priority weight for comparisons */
+  getPriorityWeight() {
+    return PRIORITY_CONFIG[this.priority]?.weight || 2;
+  }
+
+  /** Reset collision state */
+  resetCollision() {
+    this.collided = false;
+    this.collidedWith = null;
+    this.speed = this._baseSpeed;
+    this.running = false; // user must re-start
   }
 
   /** Update train position based on current track */
@@ -46,13 +94,25 @@ export class Train {
     const tan = track.getTangentAt(this.t);
     this.x = p.x;
     this.y = p.y;
-    this.angle = Math.atan2(tan.y, tan.x) * (this.direction === -1 ? 1 : 1);
+    this.angle = Math.atan2(tan.y, tan.x);
     if (this.direction === -1) this.angle += Math.PI;
   }
 
   /** Advance the train by delta time */
   advance(dt, tracks) {
-    if (!this.running || !this.currentTrackId) return;
+    if (!this.running || !this.currentTrackId || this.collided) return;
+
+    // Dwell at station
+    if (this.dwelling) {
+      this.dwellTimeRemaining -= dt;
+      if (this.dwellTimeRemaining <= 0) {
+        this.dwelling = false;
+        this.dwellTimeRemaining = 0;
+        this.currentStopIndex++;
+      }
+      return;
+    }
+
     const track = tracks.get(this.currentTrackId);
     if (!track) return;
 
@@ -65,12 +125,10 @@ export class Train {
     // Check if we've reached the end of this track segment
     if (this.t >= 1) {
       this.t = 1;
-      // Try to move to next track in route
       if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
         this.routeIndex++;
         this.currentTrackId = this.route[this.routeIndex];
         this.t = 0;
-        // Determine direction based on connection
         const nextTrack = tracks.get(this.currentTrackId);
         if (nextTrack) {
           const endPt = track.end;
@@ -80,7 +138,6 @@ export class Train {
           this.t = distToStart < distToEnd ? 0 : 1;
         }
       } else {
-        // Reverse at end
         this.direction *= -1;
         this.t = 1;
       }
@@ -106,6 +163,12 @@ export class Train {
     this.updatePosition(track);
   }
 
+  /** Start dwelling at a station */
+  startDwell(dwellSeconds = 3) {
+    this.dwelling = true;
+    this.dwellTimeRemaining = dwellSeconds;
+  }
+
   /** Hit-test */
   hitTest(wx, wy, threshold = 20) {
     const dx = wx - this.x;
@@ -129,16 +192,29 @@ export class Train {
     const carriageH = 10;
     const gap = 3;
 
+    // ── Collision indicator ──
+    if (this.collided) {
+      const pulse = 0.5 + 0.5 * Math.sin(time * 6);
+      ctx.shadowColor = `rgba(239, 68, 68, ${pulse})`;
+      ctx.shadowBlur = 20 / zoom;
+
+      // Red outline
+      ctx.strokeStyle = `rgba(239, 68, 68, ${0.6 + pulse * 0.4})`;
+      ctx.lineWidth = 3 / zoom;
+      const totalW = locoW + this.carriages * (carriageW + gap) + 10;
+      ctx.beginPath();
+      ctx.roundRect(-totalW / 2, -locoH / 2 - 4, totalW, locoH + 8, 6);
+      ctx.stroke();
+    }
+
     // ── Selection glow ──
-    if (isSelected || isHover) {
+    if ((isSelected || isHover) && !this.collided) {
       ctx.shadowColor = isSelected ? 'rgba(78, 140, 255, 0.6)' : 'rgba(124, 92, 252, 0.4)';
       ctx.shadowBlur = 12 / zoom;
     }
 
     // ── Locomotive ──
     const r = 3;
-
-    // Body
     ctx.fillStyle = this.color;
     ctx.strokeStyle = 'rgba(255,255,255,0.3)';
     ctx.lineWidth = 1 / zoom;
@@ -157,7 +233,7 @@ export class Train {
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
     const hlBright = 0.6 + 0.4 * Math.sin(time * 2 + this._headlightPhase);
-    if (this.running) {
+    if (this.running && !this.collided) {
       ctx.fillStyle = `rgba(255, 240, 180, ${hlBright})`;
       ctx.shadowColor = `rgba(255, 240, 180, ${hlBright * 0.6})`;
       ctx.shadowBlur = 8 / zoom;
@@ -214,14 +290,50 @@ export class Train {
       }
     }
 
-    // ── Label ──
-    ctx.rotate(-this.angle); // un-rotate for readable text
+    // ── Labels (un-rotate for readable text) ──
+    ctx.rotate(-this.angle);
+
     const fontSize = Math.max(8, 10 / Math.sqrt(zoom));
+
+    // Train name
     ctx.font = `600 ${fontSize}px Inter, sans-serif`;
     ctx.fillStyle = isSelected ? '#4e8cff' : '#c0c8d8';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(this.name, 0, -locoH/2 - 8);
+    ctx.fillText(this.name, 0, -locoH/2 - 10);
+
+    // Priority badge
+    const pConfig = PRIORITY_CONFIG[this.priority];
+    if (pConfig && zoom > 0.4) {
+      const badgeFontSize = Math.max(6, 8 / Math.sqrt(zoom));
+      ctx.font = `700 ${badgeFontSize}px Inter, sans-serif`;
+      ctx.fillStyle = pConfig.color;
+      ctx.textBaseline = 'bottom';
+      ctx.textAlign = 'left';
+      const nameWidth = ctx.measureText(this.name).width;
+      ctx.fillText(pConfig.badge, nameWidth / 2 + 4, -locoH/2 - 10);
+    }
+
+    // Dwelling indicator
+    if (this.dwelling) {
+      const dwellFontSize = Math.max(7, 9 / Math.sqrt(zoom));
+      ctx.font = `500 ${dwellFontSize}px Inter, sans-serif`;
+      ctx.fillStyle = '#eab308';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`⏱ ${Math.ceil(this.dwellTimeRemaining)}s`, 0, locoH/2 + 6);
+    }
+
+    // Collision badge
+    if (this.collided) {
+      const pulse = 0.7 + 0.3 * Math.sin(time * 8);
+      const collFontSize = Math.max(8, 11 / Math.sqrt(zoom));
+      ctx.font = `800 ${collFontSize}px Inter, sans-serif`;
+      ctx.fillStyle = `rgba(239, 68, 68, ${pulse})`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText('⚠ COLLISION', 0, locoH/2 + 6);
+    }
 
     ctx.restore();
   }
@@ -235,4 +347,4 @@ export class Train {
   }
 }
 
-export { TRAIN_COLORS };
+export { TRAIN_COLORS, PRIORITY_CONFIG };

@@ -1,6 +1,6 @@
 /**
  * InputHandler — mouse/keyboard events → tool actions.
- * Delegates to the active tool's handler methods.
+ * v2: Added handle drag mode for track editing, junction shortcut, Ctrl+S save.
  */
 export class InputHandler {
   constructor(canvas, camera, grid, appState) {
@@ -14,6 +14,10 @@ export class InputHandler {
     this._lastMouse = { x: 0, y: 0 };
     this._mouseWorld = { x: 0, y: 0 };
     this._cursorThrottle = 0;
+
+    // ── Handle drag state (v2) ──
+    this._draggingHandle = null;  // { trackId, handleName }
+    this._isDraggingHandle = false;
 
     this._bindEvents();
   }
@@ -73,6 +77,19 @@ export class InputHandler {
 
     // Left click
     if (e.button === 0) {
+      // ── v2: Check for handle drag in select mode ──
+      if (this.app.activeTool === 'select' && this.app.selectedElement?.type === 'track') {
+        const track = this.app.tracks.get(this.app.selectedElement.id);
+        if (track) {
+          const handle = track.hitTestHandle(world.x, world.y, this.camera.zoom);
+          if (handle) {
+            this._isDraggingHandle = true;
+            this._draggingHandle = { trackId: track.id, handleName: handle };
+            return;
+          }
+        }
+      }
+
       const snapped = this.grid.snap(world.x, world.y);
       this.app.handleToolClick?.(snapped, world, e);
     }
@@ -98,6 +115,32 @@ export class InputHandler {
       return;
     }
 
+    // ── v2: Handle dragging ──
+    if (this._isDraggingHandle && this._draggingHandle) {
+      const track = this.app.tracks.get(this._draggingHandle.trackId);
+      if (track) {
+        const snapped = this.grid.snap(world.x, world.y);
+        track.moveHandle(this._draggingHandle.handleName, snapped.x, snapped.y);
+        // Update cursor to indicate drag
+        this.canvas.style.cursor = 'grabbing';
+      }
+      return;
+    }
+
+    // ── v2: Check for handle hover in select mode ──
+    if (this.app.activeTool === 'select' && this.app.selectedElement?.type === 'track') {
+      const track = this.app.tracks.get(this.app.selectedElement.id);
+      if (track) {
+        const handle = track.hitTestHandle(world.x, world.y, this.camera.zoom);
+        this.app._hoveredHandle = handle;
+        if (handle) {
+          this.canvas.style.cursor = 'grab';
+        } else {
+          this.canvas.style.cursor = '';
+        }
+      }
+    }
+
     // Tool hover/preview
     const snapped = this.grid.snap(world.x, world.y);
     this.app.handleToolMove?.(snapped, world, e);
@@ -113,6 +156,19 @@ export class InputHandler {
   }
 
   _onMouseUp(e) {
+    // ── v2: End handle drag ──
+    if (this._isDraggingHandle && this._draggingHandle) {
+      const track = this.app.tracks.get(this._draggingHandle.trackId);
+      if (track) {
+        // Broadcast the update
+        this.app.onTrackHandleDragEnd?.(track);
+      }
+      this._isDraggingHandle = false;
+      this._draggingHandle = null;
+      this.canvas.style.cursor = '';
+      return;
+    }
+
     if (this._isPanning) {
       this._isPanning = false;
       const container = this.canvas.parentElement;
@@ -133,7 +189,6 @@ export class InputHandler {
     const factor = e.deltaY < 0 ? 1.08 : 1 / 1.08;
     this.camera.zoomAt(pos.x, pos.y, factor);
 
-    // Update zoom display
     const zoomEl = document.getElementById('zoom-level');
     if (zoomEl) zoomEl.textContent = this.camera.getZoomPercent();
   }
@@ -180,7 +235,6 @@ export class InputHandler {
       const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
       const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
 
-      // Pinch zoom
       if (this._touchDist > 0) {
         const factor = dist / this._touchDist;
         const rect = this.canvas.getBoundingClientRect();
@@ -188,7 +242,6 @@ export class InputHandler {
       }
       this._touchDist = dist;
 
-      // Pan
       if (this._isPanning) {
         const pdx = midX - this._panStart.x;
         const pdy = midY - this._panStart.y;
@@ -215,10 +268,8 @@ export class InputHandler {
   // ─── Keyboard Events ──────────────────────────────────
 
   _onKeyDown(e) {
-    // Don't intercept if typing in an input
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
-    // Tool shortcuts
     const toolMap = {
       'v': 'select',
       'h': 'pan',
@@ -227,10 +278,18 @@ export class InputHandler {
       's': 'station',
       'r': 'train',
       'g': 'signal',
+      'j': 'junction',
       'e': 'eraser',
     };
 
     const key = e.key.toLowerCase();
+
+    // Ctrl+S = save room
+    if (key === 's' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      this.app.saveRoom?.();
+      return;
+    }
 
     if (toolMap[key] && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
@@ -261,7 +320,6 @@ export class InputHandler {
       return;
     }
 
-    // Ctrl+G = toggle grid
     if (key === 'g' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       this.grid.visible = !this.grid.visible;
@@ -270,7 +328,6 @@ export class InputHandler {
       return;
     }
 
-    // +/- zoom
     if (key === '=' || key === '+') {
       this.camera.zoomAt(this.camera.width / 2, this.camera.height / 2, 1.15);
     }

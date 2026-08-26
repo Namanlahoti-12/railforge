@@ -69,6 +69,9 @@
         <button id="copy-room-code" class="icon-btn icon-btn-sm" title="Copy room code">
           <span class="material-icons-round">content_copy</span>
         </button>
+        <button id="save-room-btn" class="icon-btn icon-btn-sm save-btn" title="Save room layout (Ctrl+S)">
+          <span class="material-icons-round">save</span>
+        </button>
       </div>
     </div>
 
@@ -121,6 +124,10 @@
         <span class="material-icons-round">turn_right</span>
         <span class="tool-label">Curve</span>
       </button>
+      <button class="tool-btn" data-tool="siding-track" title="Siding / Maintenance Track">
+        <span class="material-icons-round">alt_route</span>
+        <span class="tool-label">Siding</span>
+      </button>
     </div>
     <div class="tool-separator"></div>
     <div class="tool-group">
@@ -136,6 +143,10 @@
         <span class="material-icons-round">traffic</span>
         <span class="tool-label">Signal</span>
       </button>
+      <button class="tool-btn" data-tool="junction" title="Junction / Switch (J)">
+        <span class="material-icons-round">call_split</span>
+        <span class="tool-label">Junction</span>
+      </button>
     </div>
     <div class="tool-separator"></div>
     <div class="tool-group">
@@ -149,7 +160,6 @@
   <!-- ═══════ Canvas ═══════ -->
   <main id="canvas-container">
     <canvas id="main-canvas"></canvas>
-    <!-- Ghost preview layer -->
     <div id="track-preview-hint" class="preview-hint hidden">Click to place start point</div>
   </main>
 
@@ -185,7 +195,7 @@
       <button id="toggle-grid-btn" class="icon-btn icon-btn-sm active" title="Toggle grid (Ctrl+G)">
         <span class="material-icons-round">grid_on</span>
       </button>
-      <button id="toggle-snap-btn" class="icon-btn icon-btn-sm active" title="Toggle snap (Ctrl+S)">
+      <button id="toggle-snap-btn" class="icon-btn icon-btn-sm active" title="Toggle snap">
         <span class="material-icons-round">grid_3x3</span>
       </button>
     </div>
@@ -198,6 +208,37 @@
 
   <!-- ═══════ Notification Container ═══════ -->
   <div id="notifications"></div>
+
+  <!-- ═══════ Route Configurator Modal ═══════ -->
+  <div id="route-modal" class="modal-overlay hidden">
+    <div class="modal-card glass-panel modal-route">
+      <div class="panel-header">
+        <h3>🚂 Route Configurator</h3>
+        <button id="close-route-modal" class="icon-btn icon-btn-sm">
+          <span class="material-icons-round">close</span>
+        </button>
+      </div>
+      <div class="panel-content">
+        <p class="route-description">Define the station stops for this train. Drag to reorder.</p>
+        <div id="route-station-list" class="route-station-list"></div>
+        <div class="route-actions">
+          <select id="route-add-station" class="prop-input">
+            <option value="">+ Add station stop...</option>
+          </select>
+          <div class="route-buttons">
+            <button id="route-save-btn" class="btn btn-primary btn-sm">
+              <span class="material-icons-round" style="font-size:16px">check</span>
+              Apply Route
+            </button>
+            <button id="route-clear-btn" class="btn btn-secondary btn-sm">
+              <span class="material-icons-round" style="font-size:16px">clear_all</span>
+              Clear
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- ═══════ Help Modal ═══════ -->
   <div id="help-modal" class="modal-overlay hidden">
@@ -216,9 +257,11 @@
         <div class="shortcut"><kbd>S</kbd> <span>Station</span></div>
         <div class="shortcut"><kbd>R</kbd> <span>Train</span></div>
         <div class="shortcut"><kbd>G</kbd> <span>Signal</span></div>
+        <div class="shortcut"><kbd>J</kbd> <span>Junction</span></div>
         <div class="shortcut"><kbd>E</kbd> <span>Eraser</span></div>
         <div class="shortcut"><kbd>Space</kbd> <span>Play / Pause</span></div>
         <div class="shortcut"><kbd>Del</kbd> <span>Delete selected</span></div>
+        <div class="shortcut"><kbd>Ctrl+S</kbd> <span>Save room</span></div>
         <div class="shortcut"><kbd>Ctrl+Z</kbd> <span>Undo</span></div>
         <div class="shortcut"><kbd>Scroll</kbd> <span>Zoom in / out</span></div>
         <div class="shortcut"><kbd>Middle Drag</kbd> <span>Pan canvas</span></div>

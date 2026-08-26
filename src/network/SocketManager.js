@@ -1,5 +1,6 @@
 /**
  * SocketManager — Socket.IO client for real-time collaboration.
+ * v2: Save/load room, junction operations, room-saved events.
  */
 import { io } from 'socket.io-client';
 
@@ -16,7 +17,6 @@ export class SocketManager {
   /** Connect to the Socket.IO server */
   connect() {
     return new Promise((resolve) => {
-      // Connect to same origin (proxied by Vite in dev)
       this.socket = io({ transports: ['websocket', 'polling'] });
 
       this.socket.on('connect', () => {
@@ -53,6 +53,11 @@ export class SocketManager {
       // ── Simulation control from others ──
       this.socket.on('simulation-control', (data) => {
         this.app.applyRemoteSimControl?.(data);
+      });
+
+      // ── Room saved notification ──
+      this.socket.on('room-saved', (data) => {
+        this.app.notify?.(`💾 Room saved at ${new Date(data.savedAt).toLocaleTimeString()}`, 'success');
       });
     });
   }
@@ -105,6 +110,34 @@ export class SocketManager {
   sendSimControl(data) {
     if (!this.connected || !this.roomCode) return;
     this.socket.emit('simulation-control', data);
+  }
+
+  /** Save room state to disk */
+  saveRoom() {
+    return new Promise((resolve, reject) => {
+      if (!this.connected || !this.roomCode) {
+        reject(new Error('Not connected to a room'));
+        return;
+      }
+      this.socket.emit('save-room', (response) => {
+        if (response?.error) {
+          reject(new Error(response.error));
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  /** Check if a room exists (for URL-based auto-join) */
+  async checkRoomExists(code) {
+    try {
+      const res = await fetch(`/api/rooms/${code}/exists`);
+      const data = await res.json();
+      return data.exists;
+    } catch {
+      return false;
+    }
   }
 
   /** Disconnect */
