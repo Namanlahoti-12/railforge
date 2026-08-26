@@ -122,42 +122,73 @@ export class Train {
     const dtParam = (this.speed * dt) / trackLen;
     this.t += dtParam * this.direction;
 
-    // Check if we've reached the end of this track segment
+    // Reached the END of the current track (t >= 1)
     if (this.t >= 1) {
       this.t = 1;
+      this.updatePosition(track);
+
       if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
+        // Move to the next track in the route
+        const exitPoint = this.direction === 1 ? track.end : track.start;
         this.routeIndex++;
         this.currentTrackId = this.route[this.routeIndex];
-        this.t = 0;
         const nextTrack = tracks.get(this.currentTrackId);
+
         if (nextTrack) {
-          const endPt = track.end;
-          const distToStart = Math.hypot(endPt.x - nextTrack.start.x, endPt.y - nextTrack.start.y);
-          const distToEnd = Math.hypot(endPt.x - nextTrack.end.x, endPt.y - nextTrack.end.y);
-          this.direction = distToStart < distToEnd ? 1 : -1;
-          this.t = distToStart < distToEnd ? 0 : 1;
+          // Determine which end of the next track connects to our exit point
+          const dToStart = Math.hypot(exitPoint.x - nextTrack.start.x, exitPoint.y - nextTrack.start.y);
+          const dToEnd = Math.hypot(exitPoint.x - nextTrack.end.x, exitPoint.y - nextTrack.end.y);
+
+          if (dToStart <= dToEnd) {
+            // We enter the next track at its start → move forward
+            this.t = 0;
+            this.direction = 1;
+          } else {
+            // We enter the next track at its end → move backward
+            this.t = 1;
+            this.direction = -1;
+          }
+          this.updatePosition(nextTrack);
         }
       } else {
-        this.direction *= -1;
+        // End of route — stop the train (don't bounce)
+        this.running = false;
         this.t = 1;
       }
-    } else if (this.t <= 0) {
+      return;
+    }
+
+    // Reached the START of the current track (t <= 0)
+    if (this.t <= 0) {
       this.t = 0;
-      if (this.route.length > 0 && this.routeIndex > 0) {
-        this.routeIndex--;
+      this.updatePosition(track);
+
+      if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
+        // When moving backwards (direction = -1), we exit at track.start
+        const exitPoint = this.direction === -1 ? track.start : track.end;
+        this.routeIndex++;
         this.currentTrackId = this.route[this.routeIndex];
-        const prevTrack = tracks.get(this.currentTrackId);
-        if (prevTrack) {
-          const startPt = track.start;
-          const distToStart = Math.hypot(startPt.x - prevTrack.start.x, startPt.y - prevTrack.start.y);
-          const distToEnd = Math.hypot(startPt.x - prevTrack.end.x, startPt.y - prevTrack.end.y);
-          this.direction = distToEnd < distToStart ? -1 : 1;
-          this.t = distToEnd < distToStart ? 1 : 0;
+        const nextTrack = tracks.get(this.currentTrackId);
+
+        if (nextTrack) {
+          const dToStart = Math.hypot(exitPoint.x - nextTrack.start.x, exitPoint.y - nextTrack.start.y);
+          const dToEnd = Math.hypot(exitPoint.x - nextTrack.end.x, exitPoint.y - nextTrack.end.y);
+
+          if (dToStart <= dToEnd) {
+            this.t = 0;
+            this.direction = 1;
+          } else {
+            this.t = 1;
+            this.direction = -1;
+          }
+          this.updatePosition(nextTrack);
         }
       } else {
-        this.direction *= -1;
+        // End of route — stop
+        this.running = false;
         this.t = 0;
       }
+      return;
     }
 
     this.updatePosition(track);

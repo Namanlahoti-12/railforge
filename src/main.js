@@ -1326,8 +1326,41 @@ document.getElementById('route-save-btn')?.addEventListener('click', () => {
       train.route = route;
       train.routeIndex = 0;
       train.currentTrackId = route[0];
-      const firstTrack = app.tracks.get(route[0]);
-      if (firstTrack) train.updatePosition(firstTrack);
+      train.running = true;
+
+      // Position train at the first station
+      const firstStation = app.stations.get(train.stationStops[0].stationId);
+      if (firstStation) {
+        const track = app.tracks.get(firstStation.trackId);
+        if (track) {
+          train.currentTrackId = firstStation.trackId;
+          train.t = firstStation.trackT;
+          // Ensure the station's track is at the start of the route
+          if (route[0] !== firstStation.trackId) {
+            train.route = [firstStation.trackId, ...route];
+          }
+          train.routeIndex = 0;
+          train.updatePosition(track);
+        }
+      }
+
+      app.notify(`Route set: ${route.length} track segments, ${train.stationStops.length} stops`, 'success');
+    } else {
+      app.notify('⚠ Could not find a connected path between those stations. Make sure tracks are connected!', 'warning');
+    }
+  } else if (train.stationStops.length === 1) {
+    // Single station — just set the train there
+    const station = app.stations.get(train.stationStops[0].stationId);
+    if (station) {
+      const track = app.tracks.get(station.trackId);
+      if (track) {
+        train.currentTrackId = station.trackId;
+        train.t = station.trackT;
+        train.updatePosition(track);
+        const connected = pathFinder.getConnectedTracks(station.trackId, app.tracks);
+        train.route = connected;
+        train.routeIndex = connected.indexOf(station.trackId);
+      }
     }
   }
 
@@ -1458,40 +1491,20 @@ document.getElementById('help-modal')?.addEventListener('click', (e) => {
 });
 
 document.getElementById('copy-room-code')?.addEventListener('click', () => {
-  const code = document.getElementById('room-code-display')?.textContent;
-  if (code) {
-    navigator.clipboard.writeText(code).then(() => {
-      showNotification('Room code copied!', 'success');
-    });
-  }
+  const url = window.location.href;
+  navigator.clipboard.writeText(url).then(() => {
+    showNotification('Link copied! Share it to collaborate.', 'success');
+  });
 });
 
-// v2: Save button
+// Save button
 document.getElementById('save-room-btn')?.addEventListener('click', () => app.saveRoom());
 
 // ═══════════════════════════════════════════════════════════
-//  v3: Open Collaboration — No Login, Auto-Connect
+//  Single Workspace — No Rooms, No Login
 // ═══════════════════════════════════════════════════════════
 
-function generateAnonName() {
-  const adj = ['Swift','Bold','Bright','Iron','Steel','Golden','Silver','Copper','Azure','Crimson','Frost','Storm'];
-  const noun = ['Engineer','Conductor','Driver','Signaler','Builder','Planner','Tracker','Mapper','Pilot','Captain'];
-  const a = adj[Math.floor(Math.random() * adj.length)];
-  const n = noun[Math.floor(Math.random() * noun.length)];
-  const num = Math.floor(Math.random() * 100);
-  return `${a}${n}${num}`;
-}
-
-function getOrCreateUsername() {
-  let name = localStorage.getItem('railforge-username');
-  if (!name) {
-    name = generateAnonName();
-    localStorage.setItem('railforge-username', name);
-  }
-  return name;
-}
-
-function loadStateFromServer(state) {
+function loadWorkspaceState(state) {
   for (const [id, data] of Object.entries(state.tracks || {})) {
     app.tracks.set(id, new Track(data));
   }
@@ -1528,59 +1541,50 @@ function loadStateFromServer(state) {
     document.getElementById('sim-speed-value').textContent = `${simulation.speed}×`;
     updateSimButtons();
   }
-  // Update counters to avoid duplicate names
   trainCounter = app.trains.size + 1;
   stationCounter = app.stations.size + 1;
 }
 
-/** v3: Fully automatic room bootstrap — no modal, no login */
-async function autoBootstrap() {
-  const modal = document.getElementById('room-modal');
-  const name = getOrCreateUsername();
+// Expose loadWorkspaceState to the app so SocketManager can call it
+app.loadWorkspaceState = (data) => {
+  loadWorkspaceState(data);
+  updateUsersUI();
+  const trackCount = app.tracks.size;
+  if (trackCount > 0) {
+    showNotification(`🚂 Workspace loaded (${trackCount} tracks, ${app.trains.size} trains)`, 'success');
+  } else {
+    showNotification('🚂 Welcome to RailForge! Start building your railway.', 'info');
+  }
+};
 
-  // Hide modal immediately — no login UI
-  modal.classList.add('hidden');
+// Save workspace (not room)
+app.saveRoom = async () => {
+  try {
+    const saveBtn = document.getElementById('save-room-btn');
+    saveBtn?.classList.add('saving');
+    await socket.saveWorkspace();
+    setTimeout(() => saveBtn?.classList.remove('saving'), 600);
+  } catch (err) {
+    showNotification('Save failed: ' + err.message, 'warning');
+  }
+};
+
+/** Connect to server — no login, no room codes */
+async function connectToWorkspace() {
+  // Hide room modal immediately
+  const modal = document.getElementById('room-modal');
+  modal?.classList.add('hidden');
 
   try {
     await socket.connect();
 
-    // Check if URL has a room code
-    const pathMatch = window.location.pathname.match(/\/room\/([A-Z0-9]{4,8})/i);
-    const hashMatch = window.location.hash.match(/^#([A-Z0-9]{4,8})$/i);
-    const paramMatch = new URLSearchParams(window.location.search).get('room');
-    const roomCode = pathMatch?.[1]?.toUpperCase() || hashMatch?.[1]?.toUpperCase() || paramMatch?.toUpperCase();
-
-    if (roomCode) {
-      // Auto-join existing room
-      try {
-        const res = await socket.joinRoom(roomCode, name);
-        document.getElementById('room-code-display').textContent = res.roomCode;
-        document.getElementById('room-info').classList.remove('hidden');
-        window.history.replaceState({}, '', `/room/${res.roomCode}`);
-        loadStateFromServer(res.state);
-        showNotification(`🚂 Welcome, ${name}! Connected to room ${res.roomCode}`, 'success');
-      } catch (err) {
-        // Room doesn't exist — create a new one instead
-        showNotification(`Room ${roomCode} not found — creating a new room...`, 'warning');
-        const res = await socket.createRoom(name);
-        document.getElementById('room-code-display').textContent = res.roomCode;
-        document.getElementById('room-info').classList.remove('hidden');
-        window.history.replaceState({}, '', `/room/${res.roomCode}`);
-        showNotification(`🚂 Welcome, ${name}! Room ${res.roomCode} created`, 'success');
-      }
-    } else {
-      // No room code in URL — auto-create a new room
-      const res = await socket.createRoom(name);
-      document.getElementById('room-code-display').textContent = res.roomCode;
-      document.getElementById('room-info').classList.remove('hidden');
-      window.history.replaceState({}, '', `/room/${res.roomCode}`);
-      showNotification(`🚂 Welcome, ${name}! Room ${res.roomCode} created — share the URL to collaborate!`, 'success');
-    }
+    // Set a display name
+    const name = localStorage.getItem('railforge-username');
+    if (name) socket.setName(name);
 
     updateUsersUI();
   } catch (err) {
-    // Server unreachable — run in solo/offline mode
-    showNotification('Server not available — running in offline mode. Your work won\'t be saved.', 'warning');
+    showNotification('Server unavailable — running offline.', 'warning');
     updateUsersUI();
   }
 }
@@ -1599,6 +1603,6 @@ document.getElementById('toggle-minimap-btn')?.addEventListener('click', (e) => 
 // ═══════════════════════════════════════════════════════════
 app.setTool('select');
 updateUsersUI();
-autoBootstrap();
+connectToWorkspace();
 
-console.log('%c🚂 RailForge v3 Loaded — Open Collaboration', 'color: #4e8cff; font-size: 16px; font-weight: bold;');
+console.log('%c🚂 RailForge Loaded — Single Workspace', 'color: #4e8cff; font-size: 16px; font-weight: bold;');

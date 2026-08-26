@@ -1,11 +1,17 @@
 /**
  * PathFinder — graph representation of track network and route computation.
- * v2: Station-to-station routing, track-ahead validation.
+ * v3: Fixed node key rounding, improved station-to-station routing.
  */
 export class PathFinder {
   constructor() {
     this.graph = new Map(); // nodeId → [{ trackId, neighborNodeId, weight }]
     this._nodeMap = null;
+  }
+
+  /** Round to nearest 5 for more forgiving node matching */
+  _pointKey(p) {
+    const r = 5; // snap to nearest 5 units
+    return `${Math.round(p.x / r) * r},${Math.round(p.y / r) * r}`;
   }
 
   /** Rebuild graph from tracks */
@@ -15,7 +21,7 @@ export class PathFinder {
     let nodeCounter = 0;
 
     const getNode = (p) => {
-      const key = `${Math.round(p.x)},${Math.round(p.y)}`;
+      const key = this._pointKey(p);
       if (!nodeMap.has(key)) {
         nodeMap.set(key, nodeCounter++);
         this.graph.set(nodeMap.get(key), []);
@@ -43,14 +49,29 @@ export class PathFinder {
     this._nodeMap = nodeMap;
   }
 
+  /** Find nearest graph node to a world point */
+  _findNearestNode(pt) {
+    // First try exact match
+    const key = this._pointKey(pt);
+    if (this._nodeMap?.has(key)) return this._nodeMap.get(key);
+
+    // Fallback: brute-force search for closest node
+    let bestNode = undefined;
+    let bestDist = Infinity;
+    for (const [keyStr, nodeId] of (this._nodeMap || new Map())) {
+      const [kx, ky] = keyStr.split(',').map(Number);
+      const d = Math.hypot(pt.x - kx, pt.y - ky);
+      if (d < bestDist) { bestDist = d; bestNode = nodeId; }
+    }
+    return bestDist < 50 ? bestNode : undefined;
+  }
+
   /** Find shortest path between two world points → array of track IDs */
   findRoute(startPt, endPt, tracks) {
     this.buildGraph(tracks);
 
-    const startKey = `${Math.round(startPt.x)},${Math.round(startPt.y)}`;
-    const endKey = `${Math.round(endPt.x)},${Math.round(endPt.y)}`;
-    const startNode = this._nodeMap?.get(startKey);
-    const endNode = this._nodeMap?.get(endKey);
+    const startNode = this._findNearestNode(startPt);
+    const endNode = this._findNearestNode(endPt);
 
     if (startNode === undefined || endNode === undefined) return [];
     if (startNode === endNode) return [];
@@ -100,7 +121,7 @@ export class PathFinder {
   }
 
   /** 
-   * Feature 4: Find route between two stations via their track positions.
+   * Find route between two stations via their track positions.
    * Returns an array of track IDs forming the path.
    */
   findRouteBetweenStations(fromStation, toStation, tracks) {
@@ -110,14 +131,15 @@ export class PathFinder {
     const toTrack = tracks.get(toStation.trackId);
     if (!fromTrack || !toTrack) return [];
 
-    // Get the nearest endpoint of each station's track
-    const fromPt = fromTrack.getPointAt(fromStation.trackT);
-    const toPt = toTrack.getPointAt(toStation.trackT);
+    // If both stations are on the same track
+    if (fromStation.trackId === toStation.trackId) {
+      return [fromStation.trackId];
+    }
 
-    // Find closest graph nodes to these points
+    // Build graph
     this.buildGraph(tracks);
 
-    // Try routing from the closest endpoints
+    // Try routing from both endpoints of from-track to both endpoints of to-track
     const fromEndpoints = [fromTrack.start, fromTrack.end];
     const toEndpoints = [toTrack.start, toTrack.end];
 
@@ -126,9 +148,53 @@ export class PathFinder {
 
     for (const sp of fromEndpoints) {
       for (const ep of toEndpoints) {
-        const route = this.findRoute(sp, ep, tracks);
+        const startNode = this._findNearestNode(sp);
+        const endNode = this._findNearestNode(ep);
+
+        if (startNode === undefined || endNode === undefined) continue;
+        if (startNode === endNode) {
+          // Adjacent tracks — just need both
+          bestRoute = [fromStation.trackId, toStation.trackId];
+          bestLength = 0;
+          continue;
+        }
+
+        // Run Dijkstra inline to avoid rebuilding graph
+        const dist = new Map();
+        const prev = new Map();
+        const prevEdge = new Map();
+        const visited = new Set();
+
+        for (const [n] of this.graph) dist.set(n, Infinity);
+        dist.set(startNode, 0);
+        const queue = [startNode];
+
+        while (queue.length > 0) {
+          queue.sort((a, b) => dist.get(a) - dist.get(b));
+          const u = queue.shift();
+          if (visited.has(u)) continue;
+          visited.add(u);
+          if (u === endNode) break;
+
+          for (const edge of (this.graph.get(u) || [])) {
+            const alt = dist.get(u) + edge.weight;
+            if (alt < dist.get(edge.neighbor)) {
+              dist.set(edge.neighbor, alt);
+              prev.set(edge.neighbor, u);
+              prevEdge.set(edge.neighbor, edge.trackId);
+              queue.push(edge.neighbor);
+            }
+          }
+        }
+
+        const route = [];
+        let node = endNode;
+        while (prev.has(node)) {
+          route.unshift(prevEdge.get(node));
+          node = prev.get(node);
+        }
+
         if (route.length > 0) {
-          // Calculate total length
           let totalLen = 0;
           for (const tid of route) {
             const t = tracks.get(tid);
@@ -142,7 +208,7 @@ export class PathFinder {
       }
     }
 
-    // Ensure the from track is at the start and to track at the end
+    // Ensure from-track at start and to-track at end
     if (bestRoute.length > 0) {
       if (bestRoute[0] !== fromStation.trackId) {
         bestRoute.unshift(fromStation.trackId);
@@ -150,6 +216,8 @@ export class PathFinder {
       if (bestRoute[bestRoute.length - 1] !== toStation.trackId) {
         bestRoute.push(toStation.trackId);
       }
+      // Remove consecutive duplicates
+      bestRoute = bestRoute.filter((id, i) => i === 0 || id !== bestRoute[i - 1]);
     }
 
     return bestRoute;
@@ -162,6 +230,8 @@ export class PathFinder {
   buildStationRoute(stationStops, stations, tracks) {
     if (stationStops.length < 2) return [];
 
+    this.buildGraph(tracks);
+
     const fullRoute = [];
     for (let i = 0; i < stationStops.length - 1; i++) {
       const fromStation = stations.get(stationStops[i].stationId);
@@ -170,7 +240,7 @@ export class PathFinder {
 
       const segment = this.findRouteBetweenStations(fromStation, toStation, tracks);
       
-      // Avoid duplicating the connecting track
+      // Merge segment into full route, avoiding duplicates
       for (const trackId of segment) {
         if (fullRoute.length === 0 || fullRoute[fullRoute.length - 1] !== trackId) {
           fullRoute.push(trackId);
@@ -181,7 +251,7 @@ export class PathFinder {
     return fullRoute;
   }
 
-  /** Feature 7: Check if there's track connectivity ahead of a position */
+  /** Check if there's track connectivity ahead of a position */
   hasTrackAhead(trackId, direction, tracks) {
     const track = tracks.get(trackId);
     if (!track) return false;
@@ -199,10 +269,8 @@ export class PathFinder {
 
     for (const [, track] of tracks) {
       if (track.id === startTrackId) {
-        const sKey = `${Math.round(track.start.x)},${Math.round(track.start.y)}`;
-        const eKey = `${Math.round(track.end.x)},${Math.round(track.end.y)}`;
-        const sNode = this._nodeMap?.get(sKey);
-        const eNode = this._nodeMap?.get(eKey);
+        const sNode = this._findNearestNode(track.start);
+        const eNode = this._findNearestNode(track.end);
         if (sNode !== undefined) queue.push(sNode);
         if (eNode !== undefined) queue.push(eNode);
         break;

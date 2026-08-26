@@ -17,337 +17,177 @@ const io = new Server(httpServer, {
 // Serve production build
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// ─── Persistence ─────────────────────────────────────────────
-const DATA_DIR = path.join(__dirname, 'data', 'rooms');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+// ─── Single Global Workspace ─────────────────────────────────
+const DATA_DIR = path.join(__dirname, 'data');
+const SAVE_FILE = path.join(DATA_DIR, 'workspace.json');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// The one and only workspace state
+const workspace = {
+  tracks: {},
+  stations: {},
+  trains: {},
+  signals: {},
+  junctions: {},
+  simulation: { playing: false, speed: 1 },
+  users: {},
+  _dirty: false,
+};
+
+// ─── Load saved state on startup ─────────────────────────────
+function loadWorkspace() {
+  try {
+    if (fs.existsSync(SAVE_FILE)) {
+      const raw = fs.readFileSync(SAVE_FILE, 'utf-8');
+      const saved = JSON.parse(raw);
+      workspace.tracks = saved.tracks || {};
+      workspace.stations = saved.stations || {};
+      workspace.trains = saved.trains || {};
+      workspace.signals = saved.signals || {};
+      workspace.junctions = saved.junctions || {};
+      if (saved.simulation) {
+        workspace.simulation = { ...saved.simulation, playing: false };
+      }
+      console.log('  📂 Workspace loaded from disk');
+    }
+  } catch (err) {
+    console.error('  ✗ Failed to load workspace:', err.message);
+  }
 }
 
-function saveRoomToDisk(code, state) {
+function saveWorkspace() {
   try {
-    const filePath = path.join(DATA_DIR, `${code}.json`);
     const saveData = {
-      code,
       savedAt: new Date().toISOString(),
-      tracks: state.tracks,
-      stations: state.stations,
-      trains: state.trains,
-      signals: state.signals,
-      junctions: state.junctions || {},
-      simulation: state.simulation,
+      tracks: workspace.tracks,
+      stations: workspace.stations,
+      trains: workspace.trains,
+      signals: workspace.signals,
+      junctions: workspace.junctions,
+      simulation: workspace.simulation,
     };
-    fs.writeFileSync(filePath, JSON.stringify(saveData, null, 2), 'utf-8');
+    fs.writeFileSync(SAVE_FILE, JSON.stringify(saveData, null, 2), 'utf-8');
+    workspace._dirty = false;
     return true;
   } catch (err) {
-    console.error(`  ✗ Failed to save room ${code}:`, err.message);
+    console.error('  ✗ Failed to save workspace:', err.message);
     return false;
   }
 }
 
-function loadRoomFromDisk(code) {
-  try {
-    const filePath = path.join(DATA_DIR, `${code}.json`);
-    if (!fs.existsSync(filePath)) return null;
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(raw);
-  } catch (err) {
-    console.error(`  ✗ Failed to load room ${code}:`, err.message);
-    return null;
-  }
-}
+// Load on startup
+loadWorkspace();
 
-function deleteRoomFromDisk(code) {
-  try {
-    const filePath = path.join(DATA_DIR, `${code}.json`);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (err) {
-    console.error(`  ✗ Failed to delete room ${code}:`, err.message);
-  }
-}
-
-function listSavedRooms() {
-  try {
-    const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json'));
-    return files.map(f => {
-      try {
-        const raw = fs.readFileSync(path.join(DATA_DIR, f), 'utf-8');
-        const data = JSON.parse(raw);
-        return {
-          code: data.code,
-          savedAt: data.savedAt,
-          trackCount: Object.keys(data.tracks || {}).length,
-          stationCount: Object.keys(data.stations || {}).length,
-          trainCount: Object.keys(data.trains || {}).length,
-        };
-      } catch { return null; }
-    }).filter(Boolean);
-  } catch { return []; }
-}
-
-// ─── Room Storage (in-memory, synced to disk) ────────────────
-const rooms = new Map();
-
-function generateRoomCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  return code;
-}
-
-function createRoomState() {
-  return {
-    tracks: {},
-    stations: {},
-    trains: {},
-    signals: {},
-    junctions: {},
-    simulation: { playing: false, speed: 1 },
-    users: {},
-    _dirty: false,
-    _lastSave: Date.now(),
-  };
-}
-
-/** Get or restore a room from disk into memory */
-function getOrRestoreRoom(code) {
-  if (rooms.has(code)) return rooms.get(code);
-
-  // Try loading from disk
-  const saved = loadRoomFromDisk(code);
-  if (saved) {
-    const state = createRoomState();
-    state.tracks = saved.tracks || {};
-    state.stations = saved.stations || {};
-    state.trains = saved.trains || {};
-    state.signals = saved.signals || {};
-    state.junctions = saved.junctions || {};
-    if (saved.simulation) {
-      state.simulation = { ...saved.simulation, playing: false };
-    }
-    rooms.set(code, state);
-    console.log(`  📂 Restored room ${code} from disk`);
-    return state;
-  }
-  return null;
-}
-
-// Auto-save dirty rooms every 15 seconds
+// Auto-save every 10 seconds if dirty
 setInterval(() => {
-  for (const [code, state] of rooms) {
-    if (state._dirty) {
-      saveRoomToDisk(code, state);
-      state._dirty = false;
-      state._lastSave = Date.now();
-    }
+  if (workspace._dirty) {
+    saveWorkspace();
+    console.log(`  💾 Auto-saved (${Object.keys(workspace.tracks).length} tracks, ${Object.keys(workspace.trains).length} trains)`);
   }
-}, 15000);
+}, 10000);
 
 // ─── REST API ────────────────────────────────────────────────
 
-// List all saved rooms
-app.get('/api/rooms', (req, res) => {
-  res.json({ rooms: listSavedRooms() });
-});
-
-// Get a specific room's saved state
-app.get('/api/rooms/:code', (req, res) => {
-  const code = req.params.code.toUpperCase();
-  const state = getOrRestoreRoom(code);
-  if (!state) {
-    return res.status(404).json({ error: 'Room not found' });
-  }
+app.get('/api/workspace', (req, res) => {
   res.json({
-    code,
-    tracks: state.tracks,
-    stations: state.stations,
-    trains: state.trains,
-    signals: state.signals,
-    junctions: state.junctions,
-    simulation: state.simulation,
-    userCount: Object.keys(state.users).length,
+    tracks: workspace.tracks,
+    stations: workspace.stations,
+    trains: workspace.trains,
+    signals: workspace.signals,
+    junctions: workspace.junctions,
+    simulation: workspace.simulation,
+    userCount: Object.keys(workspace.users).length,
   });
 });
 
-// Force save a room
-app.post('/api/rooms/:code/save', (req, res) => {
-  const code = req.params.code.toUpperCase();
-  const state = rooms.get(code);
-  if (!state) {
-    return res.status(404).json({ error: 'Room not found or not active' });
-  }
-  const ok = saveRoomToDisk(code, state);
-  state._dirty = false;
+app.post('/api/workspace/save', (req, res) => {
+  const ok = saveWorkspace();
   res.json({ success: ok, savedAt: new Date().toISOString() });
 });
 
-// Delete a room
-app.delete('/api/rooms/:code', (req, res) => {
-  const code = req.params.code.toUpperCase();
-  rooms.delete(code);
-  deleteRoomFromDisk(code);
-  res.json({ success: true });
-});
-
-// Check if a room exists (for URL-based auto-join)
-app.get('/api/rooms/:code/exists', (req, res) => {
-  const code = req.params.code.toUpperCase();
-  const inMemory = rooms.has(code);
-  const onDisk = fs.existsSync(path.join(DATA_DIR, `${code}.json`));
-  res.json({ exists: inMemory || onDisk, code });
-});
-
-// ─── Socket.IO Connection Handling ───────────────────────────
+// ─── Socket.IO ───────────────────────────────────────────────
 io.on('connection', (socket) => {
-  console.log(`✦ User connected: ${socket.id}`);
-
-  let currentRoom = null;
-  let userName = 'Anonymous';
+  const userName = `User-${socket.id.slice(0, 4)}`;
   const userColor = `hsl(${Math.floor(Math.random() * 360)}, 70%, 60%)`;
 
-  // ── Create Room ──
-  socket.on('create-room', (data, callback) => {
-    let roomCode = generateRoomCode();
-    while (rooms.has(roomCode) || fs.existsSync(path.join(DATA_DIR, `${roomCode}.json`))) {
-      roomCode = generateRoomCode();
-    }
+  console.log(`✦ ${userName} connected`);
 
-    const state = createRoomState();
-    rooms.set(roomCode, state);
+  // Send current workspace state immediately
+  workspace.users[socket.id] = { name: userName, color: userColor, cursor: null };
 
-    userName = data?.name || 'Anonymous';
-    currentRoom = roomCode;
-    socket.join(roomCode);
-
-    state.users[socket.id] = { name: userName, color: userColor, cursor: null };
-
-    // Save immediately to persist the room
-    saveRoomToDisk(roomCode, state);
-
-    callback({ roomCode, state: sanitizeState(state), userId: socket.id, userColor });
-    console.log(`  Room created: ${roomCode} by ${userName}`);
+  socket.emit('workspace-state', {
+    tracks: workspace.tracks,
+    stations: workspace.stations,
+    trains: workspace.trains,
+    signals: workspace.signals,
+    junctions: workspace.junctions,
+    simulation: workspace.simulation,
+    users: workspace.users,
+    userId: socket.id,
+    userColor,
+    userName,
   });
 
-  // ── Join Room (supports restoring from disk) ──
-  socket.on('join-room', (data, callback) => {
-    const { roomCode, name } = data;
-    const code = roomCode?.toUpperCase();
-    
-    // Try in-memory first, then disk
-    let state = getOrRestoreRoom(code);
-
-    if (!state) {
-      callback({ error: 'Room not found. Check the code and try again.' });
-      return;
-    }
-
-    userName = name || 'Anonymous';
-    currentRoom = code;
-    socket.join(code);
-
-    state.users[socket.id] = { name: userName, color: userColor, cursor: null };
-
-    callback({ roomCode: code, state: sanitizeState(state), userId: socket.id, userColor });
-    socket.to(code).emit('user-joined', {
-      id: socket.id,
-      name: userName,
-      color: userColor,
-    });
-    console.log(`  ${userName} joined room ${code}`);
+  // Notify others
+  socket.broadcast.emit('user-joined', {
+    id: socket.id,
+    name: userName,
+    color: userColor,
   });
 
-  // ── Operation (track/station/train/signal/junction CRUD) ──
+  // ── Set display name ──
+  socket.on('set-name', (name) => {
+    if (workspace.users[socket.id]) {
+      workspace.users[socket.id].name = name;
+    }
+    socket.broadcast.emit('user-renamed', { id: socket.id, name });
+  });
+
+  // ── Operations ──
   socket.on('operation', (op) => {
-    if (!currentRoom) return;
-    const state = rooms.get(currentRoom);
-    if (!state) return;
-
-    applyOperation(state, op);
-    state._dirty = true;
-    socket.to(currentRoom).emit('operation', { ...op, _from: socket.id });
+    applyOperation(workspace, op);
+    workspace._dirty = true;
+    socket.broadcast.emit('operation', { ...op, _from: socket.id });
   });
 
-  // ── Cursor Move ──
+  // ── Cursor ──
   socket.on('cursor-move', (cursor) => {
-    if (!currentRoom) return;
-    const state = rooms.get(currentRoom);
-    if (state?.users[socket.id]) {
-      state.users[socket.id].cursor = cursor;
+    if (workspace.users[socket.id]) {
+      workspace.users[socket.id].cursor = cursor;
     }
-    socket.to(currentRoom).emit('cursor-move', { id: socket.id, ...cursor });
+    socket.broadcast.emit('cursor-move', { id: socket.id, ...cursor });
   });
 
-  // ── Simulation Control ──
+  // ── Simulation control ──
   socket.on('simulation-control', (data) => {
-    if (!currentRoom) return;
-    const state = rooms.get(currentRoom);
-    if (state) {
-      Object.assign(state.simulation, data);
-      state._dirty = true;
-      socket.to(currentRoom).emit('simulation-control', data);
-    }
+    Object.assign(workspace.simulation, data);
+    workspace._dirty = true;
+    socket.broadcast.emit('simulation-control', data);
   });
 
-  // ── Save Room (explicit trigger from client) ──
-  socket.on('save-room', (callback) => {
-    if (!currentRoom) { callback?.({ error: 'Not in a room' }); return; }
-    const state = rooms.get(currentRoom);
-    if (!state) { callback?.({ error: 'Room not found' }); return; }
-    
-    const ok = saveRoomToDisk(currentRoom, state);
-    state._dirty = false;
+  // ── Explicit save ──
+  socket.on('save-workspace', (callback) => {
+    const ok = saveWorkspace();
     callback?.({ success: ok, savedAt: new Date().toISOString() });
-    
-    // Notify all users in room
-    io.to(currentRoom).emit('room-saved', { savedAt: new Date().toISOString() });
-    console.log(`  💾 Room ${currentRoom} saved by ${userName}`);
+    io.emit('workspace-saved', { savedAt: new Date().toISOString() });
+    console.log(`  💾 Workspace saved by ${userName}`);
   });
 
   // ── Disconnect ──
   socket.on('disconnect', () => {
-    console.log(`✧ User disconnected: ${socket.id} (${userName})`);
-    if (currentRoom) {
-      const state = rooms.get(currentRoom);
-      if (state) {
-        delete state.users[socket.id];
-        socket.to(currentRoom).emit('user-left', { id: socket.id });
+    console.log(`✧ ${userName} disconnected`);
+    delete workspace.users[socket.id];
+    socket.broadcast.emit('user-left', { id: socket.id });
 
-        // Auto-save when last user leaves, but DON'T delete the room
-        if (Object.keys(state.users).length === 0) {
-          saveRoomToDisk(currentRoom, state);
-          state._dirty = false;
-          console.log(`  💾 Room ${currentRoom} auto-saved (last user left)`);
-          
-          // Remove from memory after 5 minutes of inactivity (stays on disk)
-          const roomCode = currentRoom;
-          setTimeout(() => {
-            const s = rooms.get(roomCode);
-            if (s && Object.keys(s.users).length === 0) {
-              rooms.delete(roomCode);
-              console.log(`  🧹 Room ${roomCode} unloaded from memory (saved on disk)`);
-            }
-          }, 300000); // 5 minutes
-        }
-      }
+    // Auto-save when last user leaves
+    if (Object.keys(workspace.users).length === 0) {
+      saveWorkspace();
+      console.log('  💾 Workspace auto-saved (last user left)');
     }
   });
 });
 
-// ─── Helpers ─────────────────────────────────────────────────
-
-/** Remove internal fields before sending state to clients */
-function sanitizeState(state) {
-  return {
-    tracks: state.tracks,
-    stations: state.stations,
-    trains: state.trains,
-    signals: state.signals,
-    junctions: state.junctions || {},
-    simulation: state.simulation,
-    users: state.users,
-  };
-}
-
-/** Apply Operation to Server State */
+// ─── Apply Operations ────────────────────────────────────────
 function applyOperation(state, op) {
   const { type, data } = op;
   const collections = {
@@ -358,7 +198,7 @@ function applyOperation(state, op) {
     junction: state.junctions,
   };
 
-  const [action, entity] = type.split('-'); // e.g. "add-track" → ["add","track"]
+  const [action, entity] = type.split('-');
   const collection = collections[entity];
   if (!collection) return;
 
@@ -373,14 +213,7 @@ function applyOperation(state, op) {
   }
 }
 
-// ─── SPA Fallback (production) — serve index.html for /room/:code URLs ──
-app.get('/room/:code', (req, res) => {
-  const indexPath = path.join(__dirname, 'dist', 'index.html');
-  res.sendFile(indexPath, (err) => {
-    if (err) res.status(404).send('Not found — run `npm run build` first');
-  });
-});
-
+// ─── SPA Fallback ────────────────────────────────────────────
 app.get('*', (req, res) => {
   const indexPath = path.join(__dirname, 'dist', 'index.html');
   res.sendFile(indexPath, (err) => {
@@ -388,9 +221,9 @@ app.get('*', (req, res) => {
   });
 });
 
-// ─── Start Server ────────────────────────────────────────────
+// ─── Start ───────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n  🚂 RailForge server running on http://localhost:${PORT}`);
-  console.log(`  📂 Room data stored in: ${DATA_DIR}\n`);
+  console.log(`\n  🚂 RailForge server on http://localhost:${PORT}`);
+  console.log(`  📂 Workspace: ${SAVE_FILE}\n`);
 });
