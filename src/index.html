@@ -12,8 +12,8 @@
 </head>
 <body>
 
-  <!-- ═══════ Room Modal ═══════ -->
-  <div id="room-modal" class="modal-overlay">
+  <!-- ═══════ Room Modal (hidden by default — v3 auto-connects) ═══════ -->
+  <div id="room-modal" class="modal-overlay hidden">
     <div class="modal-card glass-panel">
       <div class="modal-logo">
         <span class="modal-logo-icon">🚂</span>
@@ -197,6 +197,9 @@
       </button>
       <button id="toggle-snap-btn" class="icon-btn icon-btn-sm active" title="Toggle snap">
         <span class="material-icons-round">grid_3x3</span>
+      </button>
+      <button id="toggle-minimap-btn" class="icon-btn icon-btn-sm active" title="Toggle minimap">
+        <span class="material-icons-round">map</span>
       </button>
     </div>
   </footer>

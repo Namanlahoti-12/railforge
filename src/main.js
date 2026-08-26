@@ -482,32 +482,52 @@ function handleSignalClick(world) {
   app.notify('Signal placed', 'success');
 }
 
-// v2: Junction placement
+// v3: Junction placement — detect endpoint AND midpoint crossings
 function handleJunctionClick(world) {
-  // Find intersection point where 2+ tracks are close
-  const nearbyEndpoints = [];
+  const nearbyTracks = [];
   for (const [, track] of app.tracks) {
-    if (dist(world, track.start) < 25) nearbyEndpoints.push({ trackId: track.id, point: track.start });
-    if (dist(world, track.end) < 25) nearbyEndpoints.push({ trackId: track.id, point: track.end });
+    // Check endpoints
+    if (dist(world, track.start) < 25) {
+      nearbyTracks.push({ trackId: track.id, point: track.start });
+      continue;
+    }
+    if (dist(world, track.end) < 25) {
+      nearbyTracks.push({ trackId: track.id, point: track.end });
+      continue;
+    }
+    // Check midpoint/closest point on track
+    if (track.hitTest(world.x, world.y, 20)) {
+      const t = track.closestT(world.x, world.y);
+      const p = track.getPointAt(t);
+      nearbyTracks.push({ trackId: track.id, point: p });
+    }
   }
 
-  if (nearbyEndpoints.length < 2) {
-    app.notify('Place junction where 2+ tracks meet', 'warning');
+  if (nearbyTracks.length < 2) {
+    app.notify('Place junction where 2+ tracks meet or cross', 'warning');
     return;
   }
 
   // Calculate average position
-  const avgX = nearbyEndpoints.reduce((s, e) => s + e.point.x, 0) / nearbyEndpoints.length;
-  const avgY = nearbyEndpoints.reduce((s, e) => s + e.point.y, 0) / nearbyEndpoints.length;
+  const avgX = nearbyTracks.reduce((s, e) => s + e.point.x, 0) / nearbyTracks.length;
+  const avgY = nearbyTracks.reduce((s, e) => s + e.point.y, 0) / nearbyTracks.length;
+
+  // Check if junction already exists here
+  for (const [, j] of app.junctions) {
+    if (dist({ x: avgX, y: avgY }, { x: j.x, y: j.y }) < 25) {
+      app.notify('Junction already exists here', 'warning');
+      return;
+    }
+  }
 
   const junction = new Junction({
     x: avgX, y: avgY,
-    connectedTrackIds: nearbyEndpoints.map(e => e.trackId),
+    connectedTrackIds: nearbyTracks.map(e => e.trackId),
   });
 
   app.junctions.set(junction.id, junction);
   sendOp('add-junction', junction.toJSON());
-  app.notify(`Junction placed (${nearbyEndpoints.length} tracks)`, 'success');
+  app.notify(`Junction placed (${nearbyTracks.length} tracks connected)`, 'success');
 }
 
 function handleEraserClick(world) {
@@ -572,8 +592,9 @@ function autoConnect(newTrack) {
   }
 }
 
-// v2: Auto-create junction when 3+ tracks meet at a point
+// v3: Auto-create junction when 3+ tracks meet at a point OR cross midpoints
 function autoCreateJunction(newTrack) {
+  // Check endpoints
   for (const endpoint of [newTrack.start, newTrack.end]) {
     const meetingTracks = [];
     for (const [, track] of app.tracks) {
@@ -582,7 +603,6 @@ function autoCreateJunction(newTrack) {
       }
     }
     if (meetingTracks.length >= 3) {
-      // Check if junction already exists here
       let exists = false;
       for (const [, j] of app.junctions) {
         if (dist(endpoint, { x: j.x, y: j.y }) < 25) { exists = true; break; }
@@ -595,6 +615,37 @@ function autoCreateJunction(newTrack) {
         app.junctions.set(junction.id, junction);
         sendOp('add-junction', junction.toJSON());
         app.notify('Junction auto-created', 'info');
+      }
+    }
+  }
+
+  // Check if new track crosses any existing tracks at midpoints
+  for (const [, existingTrack] of app.tracks) {
+    if (existingTrack.id === newTrack.id) continue;
+    // Sample both tracks and check for intersections
+    const steps = 20;
+    for (let i = 1; i < steps; i++) {
+      const pNew = newTrack.getPointAt(i / steps);
+      for (let j = 1; j < steps; j++) {
+        const pExist = existingTrack.getPointAt(j / steps);
+        if (dist(pNew, pExist) < 15) {
+          // Crossing detected at midpoints!
+          const crossPt = { x: (pNew.x + pExist.x) / 2, y: (pNew.y + pExist.y) / 2 };
+          let exists = false;
+          for (const [, jn] of app.junctions) {
+            if (dist(crossPt, { x: jn.x, y: jn.y }) < 25) { exists = true; break; }
+          }
+          if (!exists) {
+            const junction = new Junction({
+              x: crossPt.x, y: crossPt.y,
+              connectedTrackIds: [newTrack.id, existingTrack.id],
+            });
+            app.junctions.set(junction.id, junction);
+            sendOp('add-junction', junction.toJSON());
+            app.notify('Junction auto-created (track crossing)', 'info');
+          }
+          return; // One crossing per track pair is enough
+        }
       }
     }
   }
@@ -1419,52 +1470,25 @@ document.getElementById('copy-room-code')?.addEventListener('click', () => {
 document.getElementById('save-room-btn')?.addEventListener('click', () => app.saveRoom());
 
 // ═══════════════════════════════════════════════════════════
-//  Room Modal & Connection (v2: URL-based auto-join)
+//  v3: Open Collaboration — No Login, Auto-Connect
 // ═══════════════════════════════════════════════════════════
 
-async function initRoom(mode, roomCode = '') {
-  const modal = document.getElementById('room-modal');
-  const errorEl = document.getElementById('modal-error');
-  const name = document.getElementById('user-name-input').value || 'User';
+function generateAnonName() {
+  const adj = ['Swift','Bold','Bright','Iron','Steel','Golden','Silver','Copper','Azure','Crimson','Frost','Storm'];
+  const noun = ['Engineer','Conductor','Driver','Signaler','Builder','Planner','Tracker','Mapper','Pilot','Captain'];
+  const a = adj[Math.floor(Math.random() * adj.length)];
+  const n = noun[Math.floor(Math.random() * noun.length)];
+  const num = Math.floor(Math.random() * 100);
+  return `${a}${n}${num}`;
+}
 
-  try {
-    if (mode === 'solo') {
-      modal.classList.add('hidden');
-      updateUsersUI();
-      showNotification('Welcome to RailForge! Start building your railway.', 'info');
-      return;
-    }
-
-    await socket.connect();
-
-    if (mode === 'create') {
-      const res = await socket.createRoom(name);
-      document.getElementById('room-code-display').textContent = res.roomCode;
-      document.getElementById('room-info').classList.remove('hidden');
-      // Update URL for shareable link
-      window.history.replaceState({}, '', `/room/${res.roomCode}`);
-      showNotification(`Room created: ${res.roomCode}`, 'success');
-    } else if (mode === 'join') {
-      if (!roomCode.trim()) {
-        errorEl.textContent = 'Please enter a room code';
-        errorEl.classList.remove('hidden');
-        return;
-      }
-      const res = await socket.joinRoom(roomCode, name);
-      document.getElementById('room-code-display').textContent = res.roomCode;
-      document.getElementById('room-info').classList.remove('hidden');
-      // Update URL
-      window.history.replaceState({}, '', `/room/${res.roomCode}`);
-      loadStateFromServer(res.state);
-      showNotification(`Joined room ${res.roomCode}`, 'success');
-    }
-
-    updateUsersUI();
-    modal.classList.add('hidden');
-  } catch (err) {
-    errorEl.textContent = err.message;
-    errorEl.classList.remove('hidden');
+function getOrCreateUsername() {
+  let name = localStorage.getItem('railforge-username');
+  if (!name) {
+    name = generateAnonName();
+    localStorage.setItem('railforge-username', name);
   }
+  return name;
 }
 
 function loadStateFromServer(state) {
@@ -1504,54 +1528,70 @@ function loadStateFromServer(state) {
     document.getElementById('sim-speed-value').textContent = `${simulation.speed}×`;
     updateSimButtons();
   }
+  // Update counters to avoid duplicate names
+  trainCounter = app.trains.size + 1;
+  stationCounter = app.stations.size + 1;
 }
 
-// Modal button handlers
-document.getElementById('create-room-btn')?.addEventListener('click', () => initRoom('create'));
-document.getElementById('join-room-btn')?.addEventListener('click', () => {
-  const code = document.getElementById('room-code-input').value;
-  initRoom('join', code);
-});
-document.getElementById('solo-mode-btn')?.addEventListener('click', () => initRoom('solo'));
+/** v3: Fully automatic room bootstrap — no modal, no login */
+async function autoBootstrap() {
+  const modal = document.getElementById('room-modal');
+  const name = getOrCreateUsername();
 
-document.getElementById('room-code-input')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    const code = e.target.value;
-    initRoom('join', code);
-  }
-});
+  // Hide modal immediately — no login UI
+  modal.classList.add('hidden');
 
-// ═══════════════════════════════════════════════════════════
-//  v2: URL-based Auto-Join
-// ═══════════════════════════════════════════════════════════
+  try {
+    await socket.connect();
 
-async function checkURLAutoJoin() {
-  // Check for /room/CODE pattern in the URL
-  const pathMatch = window.location.pathname.match(/\/room\/([A-Z0-9]{4,8})/i);
-  if (pathMatch) {
-    const roomCode = pathMatch[1].toUpperCase();
-    const nameInput = document.getElementById('user-name-input');
+    // Check if URL has a room code
+    const pathMatch = window.location.pathname.match(/\/room\/([A-Z0-9]{4,8})/i);
+    const hashMatch = window.location.hash.match(/^#([A-Z0-9]{4,8})$/i);
+    const paramMatch = new URLSearchParams(window.location.search).get('room');
+    const roomCode = pathMatch?.[1]?.toUpperCase() || hashMatch?.[1]?.toUpperCase() || paramMatch?.toUpperCase();
 
-    // Pre-fill the room code
-    const roomCodeInput = document.getElementById('room-code-input');
-    if (roomCodeInput) roomCodeInput.value = roomCode;
-
-    // If user has a saved name, auto-join immediately
-    const savedName = localStorage.getItem('railforge-username');
-    if (savedName) {
-      nameInput.value = savedName;
-      await initRoom('join', roomCode);
-      return;
+    if (roomCode) {
+      // Auto-join existing room
+      try {
+        const res = await socket.joinRoom(roomCode, name);
+        document.getElementById('room-code-display').textContent = res.roomCode;
+        document.getElementById('room-info').classList.remove('hidden');
+        window.history.replaceState({}, '', `/room/${res.roomCode}`);
+        loadStateFromServer(res.state);
+        showNotification(`🚂 Welcome, ${name}! Connected to room ${res.roomCode}`, 'success');
+      } catch (err) {
+        // Room doesn't exist — create a new one instead
+        showNotification(`Room ${roomCode} not found — creating a new room...`, 'warning');
+        const res = await socket.createRoom(name);
+        document.getElementById('room-code-display').textContent = res.roomCode;
+        document.getElementById('room-info').classList.remove('hidden');
+        window.history.replaceState({}, '', `/room/${res.roomCode}`);
+        showNotification(`🚂 Welcome, ${name}! Room ${res.roomCode} created`, 'success');
+      }
+    } else {
+      // No room code in URL — auto-create a new room
+      const res = await socket.createRoom(name);
+      document.getElementById('room-code-display').textContent = res.roomCode;
+      document.getElementById('room-info').classList.remove('hidden');
+      window.history.replaceState({}, '', `/room/${res.roomCode}`);
+      showNotification(`🚂 Welcome, ${name}! Room ${res.roomCode} created — share the URL to collaborate!`, 'success');
     }
 
-    // Otherwise show modal with room code pre-filled
-    showNotification(`Room ${roomCode} detected — enter your name and click Join`, 'info');
+    updateUsersUI();
+  } catch (err) {
+    // Server unreachable — run in solo/offline mode
+    showNotification('Server not available — running in offline mode. Your work won\'t be saved.', 'warning');
+    updateUsersUI();
   }
 }
 
-// Save username for auto-join
-document.getElementById('user-name-input')?.addEventListener('change', (e) => {
-  localStorage.setItem('railforge-username', e.target.value);
+// ── Minimap toggle ──
+let minimapVisible = true;
+document.getElementById('toggle-minimap-btn')?.addEventListener('click', (e) => {
+  minimapVisible = !minimapVisible;
+  const minimap = document.getElementById('minimap');
+  minimap.classList.toggle('minimap-hidden', !minimapVisible);
+  e.currentTarget.classList.toggle('active', minimapVisible);
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -1559,6 +1599,6 @@ document.getElementById('user-name-input')?.addEventListener('change', (e) => {
 // ═══════════════════════════════════════════════════════════
 app.setTool('select');
 updateUsersUI();
-checkURLAutoJoin();
+autoBootstrap();
 
-console.log('%c🚂 RailForge v2 Loaded', 'color: #4e8cff; font-size: 16px; font-weight: bold;');
+console.log('%c🚂 RailForge v3 Loaded — Open Collaboration', 'color: #4e8cff; font-size: 16px; font-weight: bold;');

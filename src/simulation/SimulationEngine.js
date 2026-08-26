@@ -180,20 +180,26 @@ export class SimulationEngine {
       const dist = Math.sqrt(dx*dx + dy*dy);
 
       if (dist < 40) {
-        // ── Feature 8: Assign platform ──
+        // ── Assign platform & offset position to prevent overlap ──
         const platformId = station.assignPlatform(train.id);
         if (platformId) {
           train.assignedPlatform = platformId;
+          // Offset train position based on platform index
+          const platIdx = station.platforms.findIndex(p => p.id === platformId);
+          if (platIdx >= 0) {
+            const track = this.app.tracks.get(station.trackId);
+            if (track) {
+              const normal = track.getNormalAt(station.trackT);
+              const offsetDist = (platIdx - (station.platforms.length - 1) / 2) * 18;
+              train.x = station.x + normal.x * offsetDist;
+              train.y = station.y + normal.y * offsetDist;
+            }
+          }
         }
 
         // Start dwell (3 seconds fixed)
         train.startDwell(3);
-        this.app.notify?.(`🚉 ${train.name} arrived at ${station.name}`, 'info');
-
-        // Pathfind to next station stop (if any)
-        if (train.currentStopIndex + 1 < train.stationStops.length) {
-          // Will be picked up after dwell ends in the next frame cycle
-        }
+        this.app.notify?.(`🚉 ${train.name} arrived at ${station.name} (${platformId || 'P?'})`, 'info');
       }
     }
 
@@ -203,7 +209,6 @@ export class SimulationEngine {
         if (!platform.occupied || !platform.trainId) continue;
         const train = this.app.trains.get(platform.trainId);
         if (!train || !train.dwelling) {
-          // Train is gone or no longer dwelling → release
           if (train && !train.dwelling && train.assignedPlatform === platform.id) {
             station.releasePlatform(train.id);
             train.assignedPlatform = null;

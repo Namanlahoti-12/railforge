@@ -182,6 +182,13 @@ html, body {
   overflow: hidden;
   width: 200px;
   height: 140px;
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+#minimap.minimap-hidden {
+  transform: translateY(20px) scale(0.8);
+  opacity: 0;
+  pointer-events: none;
 }
 
 #minimap-canvas {
