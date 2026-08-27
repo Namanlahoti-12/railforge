@@ -573,22 +573,60 @@ function autoConnect(newTrack) {
   for (const [, track] of app.tracks) {
     if (track.id === newTrack.id) continue;
     if (canConnect(newTrack.start, track.start)) {
-      newTrack.connections.start.push(track.id);
-      track.connections.start.push(newTrack.id);
+      if (!newTrack.connections.start.includes(track.id)) newTrack.connections.start.push(track.id);
+      if (!track.connections.start.includes(newTrack.id)) track.connections.start.push(newTrack.id);
     }
     if (canConnect(newTrack.start, track.end)) {
-      newTrack.connections.start.push(track.id);
-      track.connections.end.push(newTrack.id);
+      if (!newTrack.connections.start.includes(track.id)) newTrack.connections.start.push(track.id);
+      if (!track.connections.end.includes(newTrack.id)) track.connections.end.push(newTrack.id);
     }
     if (canConnect(newTrack.end, track.start)) {
-      newTrack.connections.end.push(track.id);
-      track.connections.start.push(newTrack.id);
+      if (!newTrack.connections.end.includes(track.id)) newTrack.connections.end.push(track.id);
+      if (!track.connections.start.includes(newTrack.id)) track.connections.start.push(newTrack.id);
     }
     if (canConnect(newTrack.end, track.end)) {
-      newTrack.connections.end.push(track.id);
-      track.connections.end.push(newTrack.id);
+      if (!newTrack.connections.end.includes(track.id)) newTrack.connections.end.push(track.id);
+      if (!track.connections.end.includes(newTrack.id)) track.connections.end.push(newTrack.id);
     }
   }
+}
+
+/**
+ * Rebuild every track's connections[] from scratch using endpoint proximity.
+ * Call this after loading a workspace to fix stale or asymmetric connection data
+ * that can accumulate when tracks are saved/loaded across multiple sessions.
+ */
+function rebuildAllConnections() {
+  const trackArr = [...app.tracks.values()];
+  // Clear existing connections
+  for (const track of trackArr) {
+    track.connections.start = [];
+    track.connections.end   = [];
+  }
+  // Rebuild bidirectionally using the same 20-unit threshold as autoConnect
+  for (let i = 0; i < trackArr.length; i++) {
+    for (let j = i + 1; j < trackArr.length; j++) {
+      const a = trackArr[i];
+      const b = trackArr[j];
+      if (canConnect(a.start, b.start)) {
+        if (!a.connections.start.includes(b.id)) a.connections.start.push(b.id);
+        if (!b.connections.start.includes(a.id)) b.connections.start.push(a.id);
+      }
+      if (canConnect(a.start, b.end)) {
+        if (!a.connections.start.includes(b.id)) a.connections.start.push(b.id);
+        if (!b.connections.end.includes(a.id)) b.connections.end.push(a.id);
+      }
+      if (canConnect(a.end, b.start)) {
+        if (!a.connections.end.includes(b.id)) a.connections.end.push(b.id);
+        if (!b.connections.start.includes(a.id)) b.connections.start.push(a.id);
+      }
+      if (canConnect(a.end, b.end)) {
+        if (!a.connections.end.includes(b.id)) a.connections.end.push(b.id);
+        if (!b.connections.end.includes(a.id)) b.connections.end.push(a.id);
+      }
+    }
+  }
+  console.log(`[RailForge] Rebuilt connections for ${trackArr.length} tracks`);
 }
 
 // v3: Auto-create junction when 3+ tracks meet at a point OR cross midpoints
@@ -1518,6 +1556,13 @@ function loadWorkspaceState(state) {
   for (const [id, data] of Object.entries(state.tracks || {})) {
     app.tracks.set(id, new Track(data));
   }
+
+  // ── Rebuild all connections from scratch after loading ──
+  // Saved workspace files can have stale or asymmetric connections[] data
+  // (only the newer track records its link to an older one). Rebuilding
+  // ensures PathFinder sees a fully correct bidirectional graph.
+  rebuildAllConnections();
+
   for (const [id, data] of Object.entries(state.stations || {})) {
     const s = new Station(data);
     const track = app.tracks.get(s.trackId);
