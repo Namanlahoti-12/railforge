@@ -178,22 +178,33 @@ export class SimulationEngine {
 
       // ── Signal Enforcement ──
       const signalInfo = this._getNearestSignalAhead(train);
-      const STOP_DISTANCE_PX = 18;  // Stop right in front of the signal post
-      const DECEL_DISTANCE_PX = 130; // Begin slowing down within this distance
+      const STOP_DISTANCE_PX = 16;   // Stop right at the signal post
+      const DECEL_DISTANCE_PX = 140; // Smoothly decelerate within this distance
 
       if (signalInfo) {
-        const { state, dist } = signalInfo;
+        const { signal, state, dist, trackLen, direction } = signalInfo;
 
         if (state === 'red') {
-          if (dist <= STOP_DISTANCE_PX) {
-            // Train has reached the signal post: full stop right in front of it
+          const moveDistThisFrame = train.speed * dt;
+          if (dist <= STOP_DISTANCE_PX || dist <= moveDistThisFrame + 4) {
+            // Train has reached the red signal: clamp position at the signal post and full stop
+            if (signal.trackId === train.currentTrackId && trackLen > 0) {
+              const offsetT = (STOP_DISTANCE_PX * 0.7) / trackLen;
+              if (direction === 1) {
+                train.t = Math.max(0, Math.min(train.t, signal.trackT - offsetT));
+              } else {
+                train.t = Math.min(1, Math.max(train.t, signal.trackT + offsetT));
+              }
+              const curTrack = this.app.tracks.get(train.currentTrackId);
+              if (curTrack) train.updatePosition(curTrack);
+            }
             train.running = false;
             train._stoppedBySignal = true;
             continue;
           } else if (dist <= DECEL_DISTANCE_PX) {
             // Approaching red signal: smoothly decelerate towards the stop point
             const progress = (dist - STOP_DISTANCE_PX) / (DECEL_DISTANCE_PX - STOP_DISTANCE_PX);
-            const factor = Math.max(0.18, Math.min(1.0, progress));
+            const factor = Math.max(0.15, Math.min(1.0, progress));
             train.speed = Math.max(10, train._baseSpeed * factor);
           }
         } else if (state === 'yellow') {
@@ -232,7 +243,7 @@ export class SimulationEngine {
    * Find the nearest signal ahead on the train's route / track path.
    * Calculates actual track distance ahead along the direction of travel.
    *
-   * @returns {{ signal: Signal, state: string, dist: number } | null}
+   * @returns {{ signal: Signal, state: string, dist: number, trackLen: number, direction: number } | null}
    */
   _getNearestSignalAhead(train) {
     if (!this.app.signals || this.app.signals.size === 0) return null;
@@ -253,14 +264,15 @@ export class SimulationEngine {
 
       let dist = Infinity;
 
-      // Case 1: Signal is on the train's current track ahead
+      // Case 1: Signal is on the train's current track
       if (signal.trackId === train.currentTrackId) {
         const deltaT = direction === 1 
           ? (signal.trackT - train.t) 
           : (train.t - signal.trackT);
 
-        if (deltaT > 0.005) { // strictly ahead
-          dist = deltaT * trackLen;
+        // Signal is ahead, or train is stopped directly at the signal
+        if (deltaT > -0.01) {
+          dist = Math.max(0, deltaT * trackLen);
         }
       } 
       // Case 2: Signal is on the next track in the train's active route
@@ -280,7 +292,7 @@ export class SimulationEngine {
         }
       }
 
-      // Case 3: Proximity fallback (within 130px and located in front of train)
+      // Case 3: Proximity fallback (in front of train)
       if (dist === Infinity) {
         const dx = signal.x - train.x;
         const dy = signal.y - train.y;
@@ -288,14 +300,14 @@ export class SimulationEngine {
         const headingX = Math.cos(train.angle);
         const headingY = Math.sin(train.angle);
         const dot = (dx * headingX + dy * headingY);
-        if (dot > 0 && euclidDist < 130) {
+        if (dot > -5 && euclidDist < 120) {
           dist = euclidDist;
         }
       }
 
-      if (dist < minDist && dist < 200) {
+      if (dist < minDist) {
         minDist = dist;
-        nearest = { signal, state: signal.state, dist };
+        nearest = { signal, state: signal.state, dist, trackLen, direction };
       }
     }
 
