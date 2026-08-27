@@ -1362,11 +1362,12 @@ document.getElementById('route-save-btn')?.addEventListener('click', () => {
   train.stationStops = app._routeConfigStops.map(s => ({ ...s }));
   train.currentStopIndex = 0;
 
-  // ── Build route via PathFinder (v5 — connection-aware) ──
+  // ── Build route via PathFinder (v8 — junction-aware) ──
   const { route, segmentMap, errors } = pathFinder.buildStationRoute(
     train.stationStops,
     app.stations,
-    app.tracks
+    app.tracks,
+    app.junctions   // ← enables mid-track junction routing
   );
 
   // ── Show per-leg errors and abort if any leg has no track path ──
