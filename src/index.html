@@ -57,6 +57,36 @@
     </div>
   </div>
 
+  <!-- ═══════ Name Entry Splash ═══════ -->
+  <div id="name-splash" class="modal-overlay">
+    <div class="modal-card glass-panel name-splash-card">
+      <div class="modal-logo">
+        <span class="modal-logo-icon name-splash-train">🚂</span>
+        <h1>RailForge</h1>
+        <p class="modal-subtitle">Collaborative Railway Simulator</p>
+      </div>
+      <div class="modal-body">
+        <p class="name-splash-prompt">Who's driving today?</p>
+        <label class="input-group name-splash-input-group">
+          <span class="material-icons-round">person</span>
+          <input
+            id="name-splash-input"
+            type="text"
+            placeholder="Enter your name…"
+            maxlength="20"
+            autocomplete="off"
+            autocapitalize="words"
+          />
+        </label>
+        <button id="name-splash-btn" class="btn btn-primary btn-lg name-splash-btn">
+          <span class="material-icons-round">train</span>
+          All aboard!
+        </button>
+        <p id="name-splash-error" class="modal-error hidden">Please enter your name to continue.</p>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════ Top Bar ═══════ -->
   <header id="top-bar" class="glass-panel">
     <div class="top-bar-section top-bar-left">

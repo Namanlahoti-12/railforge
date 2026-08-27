@@ -1657,6 +1657,62 @@ document.getElementById('toggle-minimap-btn')?.addEventListener('click', (e) => 
 });
 
 // ═══════════════════════════════════════════════════════════
+//  Name Entry Splash
+// ═══════════════════════════════════════════════════════════
+(function initNameSplash() {
+  const splash    = document.getElementById('name-splash');
+  const input     = document.getElementById('name-splash-input');
+  const btn       = document.getElementById('name-splash-btn');
+  const errMsg    = document.getElementById('name-splash-error');
+  const hiddenNameInput = document.getElementById('user-name-input');
+
+  const savedName = localStorage.getItem('railforge-username');
+
+  function dismiss(name) {
+    // Persist and propagate the name
+    localStorage.setItem('railforge-username', name);
+    if (hiddenNameInput) hiddenNameInput.value = name;
+
+    // Smooth fade-out then hide
+    splash.style.transition = 'opacity 0.45s ease, transform 0.45s ease';
+    splash.style.opacity = '0';
+    splash.style.transform = 'scale(1.04)';
+    setTimeout(() => {
+      splash.classList.add('hidden');
+      splash.style.transform = '';
+    }, 460);
+
+    updateUsersUI();
+  }
+
+  if (savedName) {
+    // Name already saved — skip splash entirely
+    if (hiddenNameInput) hiddenNameInput.value = savedName;
+    splash.classList.add('hidden');
+  } else {
+    // Pre-fill with nothing and focus the input
+    input.value = '';
+    setTimeout(() => input.focus(), 300);
+  }
+
+  function tryEnter() {
+    const name = input.value.trim();
+    if (!name) {
+      errMsg.classList.remove('hidden');
+      input.focus();
+      return;
+    }
+    errMsg.classList.add('hidden');
+    dismiss(name);
+  }
+
+  btn.addEventListener('click', tryEnter);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') tryEnter();
+  });
+})();
+
+// ═══════════════════════════════════════════════════════════
 //  Initial Setup
 // ═══════════════════════════════════════════════════════════
 app.setTool('select');
