@@ -45,14 +45,28 @@ export class SimulationEngine {
     this.playing = false;
     for (const [, train] of this.app.trains) {
       train.running = false;
-      train.t = 0;
       train.routeIndex = 0;
       train.dwelling = false;
       train.dwellTimeRemaining = 0;
       train.currentStopIndex = 0;
+
+      // Reset position from first route step (RouteStep or legacy string)
       if (train.route.length > 0) {
-        train.currentTrackId = train.route[0];
+        const firstItem = train.route[0];
+        const isStep = firstItem && typeof firstItem === 'object' && 'toT' in firstItem;
+        if (isStep) {
+          train.currentTrackId = firstItem.trackId;
+          train.t              = firstItem.fromT;
+          train.direction      = firstItem.direction;
+        } else if (typeof firstItem === 'string') {
+          train.currentTrackId = firstItem;
+          train.t = 0;
+          train.direction = 1;
+        }
+      } else {
+        train.t = 0;
       }
+
       // Reset collision
       if (train.collided) {
         train.resetCollision();
@@ -242,10 +256,13 @@ export class SimulationEngine {
       }
 
       if (closestTrain && closestTrain.route.length > 0) {
-        // Figure out which tracks the train needs to connect through this junction
-        const routeIdx = closestTrain.routeIndex;
-        const currentTrackId = closestTrain.route[routeIdx];
-        const nextTrackId = closestTrain.route[routeIdx + 1];
+        // Figure out which tracks the train needs to connect through this junction.
+        // Route entries are RouteStep objects; fall back to string for legacy routes.
+        const routeIdx   = closestTrain.routeIndex;
+        const curItem    = closestTrain.route[routeIdx];
+        const nextItem   = closestTrain.route[routeIdx + 1];
+        const currentTrackId = curItem  && typeof curItem  === 'object' ? curItem.trackId  : curItem;
+        const nextTrackId    = nextItem && typeof nextItem === 'object' ? nextItem.trackId : nextItem;
 
         if (currentTrackId && nextTrackId &&
             junction.connectedTrackIds.includes(currentTrackId) &&

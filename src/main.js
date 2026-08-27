@@ -1348,43 +1348,34 @@ document.getElementById('route-save-btn')?.addEventListener('click', () => {
     return;
   }
 
-  // ── Trim route to start at the first station's host track ──
-  // This ensures routeIndex is always 0 at the start and advance() steps
-  // through the route array correctly without skipping segments.
-  const firstStop    = train.stationStops[0];
-  const firstStation = app.stations.get(firstStop.stationId);
+  // ── RouteStep[] — first step provides the exact start position and direction ──
+  // buildStationRoute() (v7) returns RouteStep objects, not strings.
+  // route[0].fromT is the station's parametric position; route[0].direction
+  // is what PathFinder computed — we never hardcode direction = 1 here.
 
-  let finalRoute   = route;
-  let startTrackId = route[0];
-  let startT       = 0;
-
-  if (firstStation?.trackId) {
-    const idx = route.indexOf(firstStation.trackId);
-    if (idx >= 0) {
-      finalRoute   = route.slice(idx);      // discard segments before first station
-      startTrackId = firstStation.trackId;
-      startT       = firstStation.trackT;   // place train exactly at station position
-    }
-  }
+  const firstStep = route[0];
 
   // ── Apply to train ──
-  train.route           = finalRoute;
-  train.routeIndex      = 0;              // always 0 after trimming
+  train.route             = route;
+  train.routeIndex        = 0;
   train.stationSegmentMap = Object.fromEntries(segmentMap);
-  train.currentTrackId  = startTrackId;
-  train.t               = startT;
-  train.direction       = 1;
-  train.running         = false;          // user presses Play to start
-  train.currentStopIndex = 0;
+  train.currentTrackId    = firstStep.trackId;
+  train.t                 = firstStep.fromT;
+  train.direction         = firstStep.direction; // from PathFinder, not hardcoded
+  train.running           = false;               // user presses Play to start
+  train.currentStopIndex  = 0;
 
-  const startTrack = app.tracks.get(startTrackId);
+  const startTrack = app.tracks.get(firstStep.trackId);
   if (startTrack) train.updatePosition(startTrack);
+
+  // Debug: print route steps to console for verification
+  train.debugRoute();
 
   sendOp('update-train', train.toJSON());
   document.getElementById('route-modal').classList.add('hidden');
   updatePropertiesPanel();
   app.notify(
-    `🗺 Route set: ${finalRoute.length} track segments, ${train.stationStops.length} stops. Press ▶ Play to start.`,
+    `🗺 Route set: ${route.length} steps across ${train.stationStops.length} stops. Press ▶ Play to start.`,
     'success'
   );
 });

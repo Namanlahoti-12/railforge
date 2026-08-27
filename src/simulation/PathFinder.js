@@ -1,64 +1,65 @@
 /**
- * PathFinder v5 — Connection-aware shortest-path routing.
+ * PathFinder v7 — Directional RouteStep output.
  *
- * Key fixes over v4:
- *  1. Graph is built using track.connections[] (populated by autoConnect with 20-unit
- *     tolerance) instead of coordinate-snap — branch tracks at junctions now connect
- *     correctly even if endpoint coordinates differ by a few pixels.
- *  2. buildStationRoute() returns an `errors` array with per-leg human-readable messages
- *     when no track path exists between two stations.
- *  3. Station virtual nodes are still injected at exact (x,y) as before.
+ * v7 over v6:
+ *   buildStationRoute() now returns RouteStep[] instead of string[].
+ *
+ *   A RouteStep is:
+ *     { trackId, fromNode, toNode, fromT, toT, direction }
+ *
+ *   fromT / toT are derived from _nodeTbyTrack (a precise map built
+ *   during graph construction using exact station.trackT values and the
+ *   canonical 0/1 for track endpoints) — no lossy closestT() sampling.
+ *
+ *   Consecutive same-track, same-direction, contiguous steps are merged
+ *   into one step (collapses station-split sub-edges for same-direction
+ *   traversal). Steps with different directions (backtracking through a
+ *   dead-end branch) are deliberately NOT merged.
+ *
+ *   All Union-Find connectivity, error reporting, and graph construction
+ *   from v6 are fully preserved.
+ *
+ * Pipeline:
+ *   PathFinder.buildStationRoute()
+ *       ↓  RouteStep[]
+ *   main.js route-save handler
+ *       ↓  train.route = RouteStep[]
+ *   Train.advance()
+ *       ↓  follows step.fromT → step.toT with step.direction
+ *   Junction / Signal / Collision (unchanged — still use currentTrackId + t)
  */
 export class PathFinder {
   constructor() {
-    // nodeId  →  [ { trackId, toNode, weight } ]
-    this._adj = new Map();
-    // "x,y" key → nodeId  (used for exact-coord lookup)
-    this._nodeMap = new Map();
-    this._nodeCoords = new Map();  // nodeId → {x, y}
-    this._nodeCounter = 0;
+    this._adj          = new Map(); // nodeId → [{trackId, toNode, weight}]
+    this._nodeCoords   = new Map(); // nodeId → {x, y}
+    this._nodeCounter  = 0;
+    this._trackNodes   = new Map(); // trackId → {s: nodeId, e: nodeId}
+    this._nodeTbyTrack = new Map(); // "${nodeId}:${trackId}" → t ∈ [0,1]
   }
 
   // ─────────────────────────────────────────────────────────
   //  Internal graph helpers
   // ─────────────────────────────────────────────────────────
 
-  _snap(v) { return Math.round(v); }
-  _key(p)  { return `${this._snap(p.x)},${this._snap(p.y)}`; }
-
-  /**
-   * Standard node creation by exact coordinate key.
-   * Used for station virtual nodes where precision matters.
-   */
-  _getOrCreateNode(p) {
-    const k = this._key(p);
-    if (!this._nodeMap.has(k)) {
-      const id = this._nodeCounter++;
-      this._nodeMap.set(k, id);
-      this._nodeCoords.set(id, { x: p.x, y: p.y });
-      this._adj.set(id, []);
-    }
-    return this._nodeMap.get(k);
+  _addEdge(from, to, trackId, weight) {
+    this._adj.get(from).push({ toNode: to, trackId, weight });
+    this._adj.get(to).push({ toNode: from, trackId, weight });
   }
 
-  /**
-   * Tolerant node creation — merges with any existing node within CONNECT_THRESHOLD.
-   * This matches autoConnect()'s 20-unit threshold so the graph reflects exactly
-   * the same connectivity that was established when tracks were placed.
-   */
-  _getOrCreateNodeTolerant(p) {
-    const CONNECT_THRESHOLD = 20;
-    for (const [nodeId, coords] of this._nodeCoords) {
-      if (Math.hypot(p.x - coords.x, p.y - coords.y) < CONNECT_THRESHOLD) {
-        return nodeId;
-      }
-    }
-    return this._getOrCreateNode(p);
+  _removeEdge(from, to, trackId) {
+    const rm = (list, target, tid) => {
+      const i = list?.findIndex(e => e.toNode === target && e.trackId === tid);
+      if (i >= 0) list.splice(i, 1);
+    };
+    rm(this._adj.get(from), to, trackId);
+    rm(this._adj.get(to), from, trackId);
   }
 
-  _addEdge(fromNode, toNode, trackId, weight) {
-    this._adj.get(fromNode).push({ toNode, trackId, weight });
-    this._adj.get(toNode).push({ toNode: fromNode, trackId, weight });
+  _newNode(coords) {
+    const id = this._nodeCounter++;
+    this._adj.set(id, []);
+    this._nodeCoords.set(id, { x: coords.x, y: coords.y });
+    return id;
   }
 
   // ─────────────────────────────────────────────────────────
@@ -66,85 +67,150 @@ export class PathFinder {
   // ─────────────────────────────────────────────────────────
 
   /**
-   * Build the routing graph.
+   * Build the routing graph using Union-Find to merge connected endpoints.
+   * Populates _nodeTbyTrack so buildStationRoute() can derive exact t values.
+   *
    * @param {Map} tracks
-   * @param {Map} [stations]  – optional; injects station coords as virtual nodes
+   * @param {Map} [stations]
    * @returns {Map} stationNodeMap: stationId → nodeId
    */
   buildGraph(tracks, stations = new Map()) {
     this._adj.clear();
-    this._nodeMap.clear();
     this._nodeCoords.clear();
     this._nodeCounter = 0;
+    this._trackNodes.clear();
+    this._nodeTbyTrack.clear();
 
-    // ── Step 1: Create endpoint nodes for every track (tolerant merge) ──
-    // This ensures that two track endpoints placed within 20 units of each other
-    // (i.e. "connected" per autoConnect) share the SAME graph node.
-    for (const [, track] of tracks) {
-      this._getOrCreateNodeTolerant(track.start);
-      this._getOrCreateNodeTolerant(track.end);
-    }
+    const trackArr = [...tracks.values()];
+    const N        = trackArr.length;
+    if (N === 0) return new Map();
 
-    // ── Step 2: Add a graph edge for each track segment ──
-    for (const [, track] of tracks) {
-      const totalLen = track.getLength() || 1;
-      const startNode = this._getOrCreateNodeTolerant(track.start);
-      const endNode   = this._getOrCreateNodeTolerant(track.end);
-      if (startNode !== endNode) {
-        this._addEdge(startNode, endNode, track.id, totalLen);
+    // ── Step 1: Union-Find over raw endpoint indices (0..2N-1) ──
+    // Index layout: track i → start = 2i, end = 2i+1
+    const parent = Array.from({ length: N * 2 }, (_, i) => i);
+
+    const find = (x) => {
+      while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+      return x;
+    };
+    const union = (x, y) => {
+      const rx = find(x), ry = find(y);
+      if (rx !== ry) parent[rx] = ry;
+    };
+
+    const trackToIdx = new Map();
+    for (let i = 0; i < N; i++) trackToIdx.set(trackArr[i].id, i);
+
+    const THRESHOLD = 20;
+
+    for (let i = 0; i < N; i++) {
+      const track = trackArr[i];
+
+      // ── Primary: track.connections[] (set by autoConnect) ──
+      for (const connId of (track.connections?.start || [])) {
+        const ci = trackToIdx.get(connId);
+        if (ci === undefined) continue;
+        const conn = trackArr[ci];
+        const dS = Math.hypot(track.start.x - conn.start.x, track.start.y - conn.start.y);
+        const dE = Math.hypot(track.start.x - conn.end.x,   track.start.y - conn.end.y);
+        union(2 * i, dS <= dE ? 2 * ci : 2 * ci + 1);
+      }
+      for (const connId of (track.connections?.end || [])) {
+        const ci = trackToIdx.get(connId);
+        if (ci === undefined) continue;
+        const conn = trackArr[ci];
+        const dS = Math.hypot(track.end.x - conn.start.x, track.end.y - conn.start.y);
+        const dE = Math.hypot(track.end.x - conn.end.x,   track.end.y - conn.end.y);
+        union(2 * i + 1, dS <= dE ? 2 * ci : 2 * ci + 1);
+      }
+
+      // ── Fallback: proximity merge for tracks with no connections data ──
+      for (let j = i + 1; j < N; j++) {
+        const other = trackArr[j];
+        if (Math.hypot(track.start.x - other.start.x, track.start.y - other.start.y) < THRESHOLD) union(2*i,   2*j);
+        if (Math.hypot(track.start.x - other.end.x,   track.start.y - other.end.y)   < THRESHOLD) union(2*i,   2*j+1);
+        if (Math.hypot(track.end.x   - other.start.x, track.end.y   - other.start.y) < THRESHOLD) union(2*i+1, 2*j);
+        if (Math.hypot(track.end.x   - other.end.x,   track.end.y   - other.end.y)   < THRESHOLD) union(2*i+1, 2*j+1);
       }
     }
 
-    // ── Step 3: Inject station virtual nodes (exact precision) ──
-    // Collect which station(s) sit on each track
-    const stationsByTrack = new Map(); // trackId → [{stationId, t, x, y}]
-    for (const [sid, station] of stations) {
-      if (!station.trackId) continue;
-      if (!stationsByTrack.has(station.trackId)) stationsByTrack.set(station.trackId, []);
-      stationsByTrack.get(station.trackId).push({
-        stationId: sid,
-        t: station.trackT,
-        x: station.x,
-        y: station.y,
+    // ── Step 2: Materialise canonical graph nodes from UF roots ──
+    const rootToNodeId = new Map();
+
+    const canonOf = (ufIdx) => {
+      const root = find(ufIdx);
+      if (!rootToNodeId.has(root)) {
+        const ti     = Math.floor(root / 2);
+        const coords = root % 2 === 0 ? trackArr[ti].start : trackArr[ti].end;
+        rootToNodeId.set(root, this._newNode(coords));
+      }
+      return rootToNodeId.get(root);
+    };
+
+    for (let i = 0; i < N; i++) {
+      this._trackNodes.set(trackArr[i].id, {
+        s: canonOf(2 * i),
+        e: canonOf(2 * i + 1),
       });
     }
 
-    const stationNodeMap = new Map(); // stationId → nodeId
+    // ── Step 3: Add graph edges + record t=0/1 for endpoint nodes ──
+    for (let i = 0; i < N; i++) {
+      const track    = trackArr[i];
+      const { s, e } = this._trackNodes.get(track.id);
+      const len      = track.getLength() || 1;
 
-    for (const [, track] of tracks) {
-      const trackStations = stationsByTrack.get(track.id) || [];
-      if (trackStations.length === 0) continue;
+      if (s !== e) this._addEdge(s, e, track.id, len);
 
-      const totalLen  = track.getLength() || 1;
-      const startNode = this._getOrCreateNodeTolerant(track.start);
-      const endNode   = this._getOrCreateNodeTolerant(track.end);
+      // Record exact t values for endpoint nodes on this track.
+      // Key = "${nodeId}:${trackId}" so junction nodes can store different
+      // t values for different tracks (t=1 on T1, t=0 on T2, etc.).
+      this._nodeTbyTrack.set(`${s}:${track.id}`, 0);
+      this._nodeTbyTrack.set(`${e}:${track.id}`, 1);
+    }
 
-      // Build injection point list: track start + station midpoints + track end
+    // ── Step 4: Inject station virtual nodes ──
+    const stationsByTrack = new Map();
+    for (const [sid, station] of stations) {
+      if (!station.trackId) continue;
+      if (!stationsByTrack.has(station.trackId)) stationsByTrack.set(station.trackId, []);
+      stationsByTrack.get(station.trackId).push({ stationId: sid, t: station.trackT });
+    }
+
+    const stationNodeMap = new Map();
+
+    for (let i = 0; i < N; i++) {
+      const track     = trackArr[i];
+      const tStations = stationsByTrack.get(track.id) || [];
+      if (tStations.length === 0) continue;
+
+      const { s: sn, e: en } = this._trackNodes.get(track.id);
+      const totalLen = track.getLength() || 1;
+
       const injectPts = [
-        { t: 0, nodeId: startNode },
-        { t: 1, nodeId: endNode },
+        { t: 0, nodeId: sn },
+        { t: 1, nodeId: en },
       ];
 
-      for (const s of trackStations) {
-        const pt     = track.getPointAt(s.t);
-        const nodeId = this._getOrCreateNode(pt); // exact position for stations
-        injectPts.push({ t: s.t, nodeId });
-        stationNodeMap.set(s.stationId, nodeId);
+      for (const s of tStations) {
+        const pt    = track.getPointAt(s.t);
+        const vNode = this._newNode(pt);
+        injectPts.push({ t: s.t, nodeId: vNode });
+        stationNodeMap.set(s.stationId, vNode);
+
+        // Record exact t for this station's virtual node
+        this._nodeTbyTrack.set(`${vNode}:${track.id}`, s.t);
       }
 
-      // Sort by t and link adjacent points with partial-length edges
       injectPts.sort((a, b) => a.t - b.t);
+      this._removeEdge(sn, en, track.id);
 
-      // Remove existing direct edge between startNode and endNode —
-      // we'll replace it with the segmented version through station nodes.
-      this._removeEdge(startNode, endNode, track.id);
-
-      for (let i = 0; i < injectPts.length - 1; i++) {
-        const a = injectPts[i];
-        const b = injectPts[i + 1];
-        const segWeight = (b.t - a.t) * totalLen;
-        if (a.nodeId !== b.nodeId && segWeight > 0) {
-          this._addEdge(a.nodeId, b.nodeId, track.id, segWeight);
+      for (let k = 0; k < injectPts.length - 1; k++) {
+        const a = injectPts[k];
+        const b = injectPts[k + 1];
+        const w = (b.t - a.t) * totalLen;
+        if (a.nodeId !== b.nodeId && w > 0) {
+          this._addEdge(a.nodeId, b.nodeId, track.id, w);
         }
       }
     }
@@ -152,28 +218,10 @@ export class PathFinder {
     return stationNodeMap;
   }
 
-  /** Remove a specific edge between two nodes (both directions). */
-  _removeEdge(fromNode, toNode, trackId) {
-    const removeFrom = this._adj.get(fromNode);
-    if (removeFrom) {
-      const idx = removeFrom.findIndex(e => e.toNode === toNode && e.trackId === trackId);
-      if (idx >= 0) removeFrom.splice(idx, 1);
-    }
-    const removeTo = this._adj.get(toNode);
-    if (removeTo) {
-      const idx = removeTo.findIndex(e => e.toNode === fromNode && e.trackId === trackId);
-      if (idx >= 0) removeTo.splice(idx, 1);
-    }
-  }
-
   // ─────────────────────────────────────────────────────────
   //  Dijkstra
   // ─────────────────────────────────────────────────────────
 
-  /**
-   * Find the shortest path between two node IDs.
-   * Returns array of { trackId, fromNode, toNode } edges in order.
-   */
   _dijkstra(sourceNode, targetNode) {
     const dist    = new Map();
     const prev    = new Map();
@@ -202,16 +250,13 @@ export class PathFinder {
       }
     }
 
-    if (!prev.has(targetNode)) return null; // unreachable
+    if (!prev.has(targetNode)) return null;
 
     const edges = [];
     let cur = targetNode;
     while (prev.has(cur)) {
       const { fromNode, trackId } = prev.get(cur);
-      if (trackId !== null) {
-        // Skip zero-weight bridge edges (null trackId)
-        edges.unshift({ trackId, fromNode, toNode: cur });
-      }
+      if (trackId !== null) edges.unshift({ trackId, fromNode, toNode: cur });
       cur = fromNode;
     }
     return edges;
@@ -222,38 +267,30 @@ export class PathFinder {
   // ─────────────────────────────────────────────────────────
 
   /**
-   * Build the full ordered route (array of track IDs) for a
-   * multi-stop station sequence, using Dijkstra on coordinates.
+   * Build the full ordered route as a RouteStep[] for a multi-stop sequence.
    *
-   * Key design:
-   *  - Branch stations (near the dead-end tip of a track) require the train to
-   *    BACKTRACK through the same track to return to the junction. The route
-   *    must include that track TWICE — once going in, once coming back out.
-   *  - Middle-of-track stations (train passes through and continues) should NOT
-   *    repeat the track — the train naturally continues after dwelling.
+   * Each RouteStep: { trackId, fromNode, toNode, fromT, toT, direction }
    *
-   *  The deduplication at leg boundaries must distinguish these two cases by
-   *  checking whether the first edge of a new leg goes FORWARD (skip) or
-   *  BACKWARD / backtracking (keep both occurrences).
+   * fromT/toT come from _nodeTbyTrack (exact values, not approximations).
+   * direction = +1 if fromT < toT, -1 if fromT > toT.
    *
-   * @param {Array}  stationStops  [{stationId, stationName}, ...]
-   * @param {Map}    stations      all Station objects
-   * @param {Map}    tracks        all Track objects
-   * @returns {{ route: string[], segmentMap: Map, errors: string[] }}
+   * Consecutive steps with same trackId + same direction + contiguous t values
+   * are merged into one step (handles station-split sub-edges). Steps with
+   * different directions are never merged (handles dead-end branch backtracking).
+   *
+   * @param {Array} stationStops  [{stationId, stationName}, ...]
+   * @param {Map}   stations
+   * @param {Map}   tracks
+   * @returns {{ route: RouteStep[], segmentMap: Map, errors: string[] }}
    */
   buildStationRoute(stationStops, stations, tracks) {
     if (stationStops.length < 1) return { route: [], segmentMap: new Map(), errors: [] };
 
     const stationNodeMap = this.buildGraph(tracks, stations);
 
-    const fullRoute  = [];
+    const rawSteps  = [];
     const segmentMap = new Map();
     const errors     = [];
-
-    // Track the graph-node traversal across legs so we can detect direction changes
-    // at leg boundaries (determines whether same-track duplicates are backtracks).
-    let lastEdgeEntryNode = null;  // fromNode of the last edge added to fullRoute
-    let lastEdgeExitNode  = null;  // toNode  of the last edge added to fullRoute
 
     for (let i = 0; i < stationStops.length - 1; i++) {
       const from = stationStops[i];
@@ -262,7 +299,6 @@ export class PathFinder {
       const fromNode = stationNodeMap.get(from.stationId);
       const toNode   = stationNodeMap.get(to.stationId);
 
-      // ── Validate station placement ──
       if (fromNode === undefined) {
         errors.push(`⚠ "${from.stationName}" is not placed on any track`);
         continue;
@@ -272,13 +308,10 @@ export class PathFinder {
         continue;
       }
 
-      if (i === 0) {
-        segmentMap.set(from.stationId, fullRoute.length);
-      }
+      if (i === 0) segmentMap.set(from.stationId, 0);
 
       const edges = this._dijkstra(fromNode, toNode);
 
-      // ── Per-leg error if no path ──
       if (!edges || edges.length === 0) {
         errors.push(
           `❌ No track path from "${from.stationName}" → "${to.stationName}". ` +
@@ -287,80 +320,66 @@ export class PathFinder {
         continue;
       }
 
-      for (let j = 0; j < edges.length; j++) {
-        const edge = edges[j];
+      for (const edge of edges) {
         if (!edge.trackId) continue;
 
-        const isSameTrackAsLast = (
-          fullRoute.length > 0 &&
-          fullRoute[fullRoute.length - 1] === edge.trackId
-        );
+        // Retrieve exact t values from _nodeTbyTrack (built during graph construction).
+        // These are exact: 0 or 1 for track endpoints, station.trackT for station nodes.
+        const fromT = this._nodeTbyTrack.get(`${edge.fromNode}:${edge.trackId}`) ?? 0;
+        const toT   = this._nodeTbyTrack.get(`${edge.toNode}:${edge.trackId}`)   ?? 1;
 
-        if (j === 0 && isSameTrackAsLast) {
-          // ── Leg-boundary same-track decision ──
-          //
-          // Case A — BACKTRACK (keep both):
-          //   The first edge of this new leg goes toward lastEdgeEntryNode
-          //   (the node we entered the previous occurrence of this track FROM).
-          //   This means the train reached a dead-end (branch tip) and must
-          //   REVERSE through the same track back to the junction.
-          //   Example: S2 on branch tip → next leg must go back through branch.
-          //
-          // Case B — FORWARD CONTINUATION (skip):
-          //   The first edge goes away from lastEdgeEntryNode (deeper into the
-          //   track's second half). The train naturally continues after dwelling;
-          //   no extra entry needed.
+        // Skip zero-length steps (e.g. station placed exactly at a track endpoint)
+        if (Math.abs(toT - fromT) < 0.0001) continue;
 
-          const isBacktrack = (edge.toNode === lastEdgeEntryNode);
+        const direction = toT > fromT ? 1 : -1;
 
-          if (!isBacktrack) {
-            // Forward continuation: update traversal tracking but don't add
-            lastEdgeEntryNode = edge.fromNode;
-            lastEdgeExitNode  = edge.toNode;
-            continue;
-          }
-          // Backtrack: fall through and add the edge (track appears twice in route)
-        }
-
-        fullRoute.push(edge.trackId);
-        lastEdgeEntryNode = edge.fromNode;
-        lastEdgeExitNode  = edge.toNode;
+        rawSteps.push({
+          trackId:   edge.trackId,
+          fromNode:  edge.fromNode,
+          toNode:    edge.toNode,
+          fromT,
+          toT,
+          direction,
+        });
       }
 
-      segmentMap.set(to.stationId, fullRoute.length - 1);
+      segmentMap.set(to.stationId, rawSteps.length - 1);
     }
 
-    return { route: fullRoute, segmentMap, errors };
+    if (errors.length > 0) return { route: [], segmentMap, errors };
+
+    // ── Merge consecutive same-track, same-direction, contiguous steps ──
+    // Collapses station-split sub-edges (forward continuations).
+    // Does NOT merge steps with different directions (backtracking preserved).
+    const route = _mergeRouteSteps(rawSteps);
+
+    return { route, segmentMap, errors };
+  }
+
+  /** Simple version — just the track ID array (for auto-route button). */
+  buildStationRouteSimple(stationStops, stations, tracks) {
+    const { route } = this.buildStationRoute(stationStops, stations, tracks);
+    return route.map(s => s.trackId);
   }
 
   /**
-   * Simple version: returns just the track ID array.
-   * Used for the "auto-route all connected" button.
+   * BFS — all track IDs reachable from a starting track.
+   * Used for the free-running trains (no station config).
    */
-  buildStationRouteSimple(stationStops, stations, tracks) {
-    const { route } = this.buildStationRoute(stationStops, stations, tracks);
-    return route;
-  }
-
-  /** Find all track IDs reachable from a starting track (BFS). Used for free-running. */
   getConnectedTracks(startTrackId, tracks) {
     this.buildGraph(tracks);
 
-    const startTrack = tracks.get(startTrackId);
-    if (!startTrack) return [];
-
-    const startNodeA = this._getOrCreateNodeTolerant(startTrack.start);
-    const startNodeB = this._getOrCreateNodeTolerant(startTrack.end);
+    const nodes = this._trackNodes.get(startTrackId);
+    if (!nodes) return [];
 
     const visited = new Set();
     const result  = new Set();
-    const queue   = [startNodeA, startNodeB];
+    const queue   = [nodes.s, nodes.e];
 
     while (queue.length > 0) {
       const node = queue.shift();
       if (visited.has(node)) continue;
       visited.add(node);
-
       for (const edge of (this._adj.get(node) || [])) {
         if (edge.trackId) result.add(edge.trackId);
         if (!visited.has(edge.toNode)) queue.push(edge.toNode);
@@ -370,11 +389,46 @@ export class PathFinder {
     return [...result];
   }
 
-  /** Check if any track is connected ahead in a given direction. */
+  /** Whether a track has any connected track ahead in the given direction. */
   hasTrackAhead(trackId, direction, tracks) {
     const track = tracks.get(trackId);
     if (!track) return false;
-    const connections = direction === 1 ? track.connections.end : track.connections.start;
-    return connections.length > 0;
+    const conns = direction === 1 ? track.connections?.end : track.connections?.start;
+    return !!(conns && conns.length > 0);
   }
+}
+
+// ─────────────────────────────────────────────────────────
+//  Route step merging (module-level helper)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Merge consecutive RouteSteps that:
+ *   • share the same trackId
+ *   • share the same direction
+ *   • have contiguous t values (prev.toT ≈ next.fromT)
+ *
+ * This collapses the sub-edges produced when a station splits a track into
+ * two graph segments during the same-direction traversal.
+ *
+ * Steps in OPPOSITE directions (backtracking) are never merged — they
+ * represent physically distinct traversals of the same track.
+ */
+function _mergeRouteSteps(steps) {
+  const merged = [];
+  for (const step of steps) {
+    const last = merged[merged.length - 1];
+    if (
+      last &&
+      last.trackId   === step.trackId &&
+      last.direction === step.direction &&
+      Math.abs(last.toT - step.fromT) < 0.002
+    ) {
+      last.toT    = step.toT;
+      last.toNode = step.toNode;
+    } else {
+      merged.push({ ...step });
+    }
+  }
+  return merged;
 }

@@ -1,7 +1,16 @@
 /**
  * Train — data model and rendering for a train moving along tracks.
- * v5: Fixed advance() exit-point logic, added junction auto-switching so trains
- *     physically follow configured timetable routes through forks/branches.
+ *
+ * v6: Directional RouteStep-based movement.
+ *
+ * Route format changed from string[] (track IDs) to RouteStep[]:
+ *   { trackId, fromNode, toNode, fromT, toT, direction }
+ *
+ * advance() reads direction, fromT, toT from the current step.
+ * The train NEVER guesses direction from nearest endpoint.
+ *
+ * Backward compatibility: if route contains plain strings (legacy saves),
+ * the train runs to the end of its current track and stops cleanly.
  */
 
 const TRAIN_COLORS = [
@@ -24,8 +33,8 @@ export class Train {
     this.t = data.t ?? 0;               // parametric position on current track [0,1]
     this.speed = data.speed ?? 60;       // world units per second
     this._baseSpeed = data._baseSpeed ?? data.speed ?? 60;
-    this.direction = data.direction ?? 1; // 1 = forward, -1 = reverse
-    this.route = data.route || [];        // ordered array of track IDs
+    this.direction = data.direction ?? 1; // 1 = forward (t↑), -1 = reverse (t↓)
+    this.route = data.route || [];        // RouteStep[] — see PathFinder v7
     this.routeIndex = data.routeIndex ?? 0;
     this.running = data.running ?? false;
     this.carriages = data.carriages ?? 2;
@@ -33,25 +42,25 @@ export class Train {
     this.y = data.y ?? 0;
     this.angle = data.angle ?? 0;
 
-    // ── Station Routing (v2) ──
+    // ── Station Routing ──
     this.stationStops = data.stationStops || [];  // [{stationId, stationName}]
     this.currentStopIndex = data.currentStopIndex ?? 0;
 
-    // ── Priority (v2) ──
+    // ── Priority ──
     this.priority = data.priority || 'medium'; // 'high' | 'medium' | 'low'
 
-    // ── Collision (v2) ──
+    // ── Collision ──
     this.collided = data.collided ?? false;
     this.collidedWith = data.collidedWith || null;
 
-    // ── Dwell timer (v2) ──
+    // ── Dwell timer ──
     this.dwelling = data.dwelling ?? false;
     this.dwellTimeRemaining = data.dwellTimeRemaining ?? 0;
 
     // ── Platform assignment ──
     this.assignedPlatform = data.assignedPlatform ?? null;
 
-    // ── Station→RouteIndex map (v4) ──
+    // ── Station→RouteIndex map (debug hint; proximity detection is authoritative) ──
     this.stationSegmentMap = data.stationSegmentMap || {};
 
     // Headlight flicker
@@ -64,7 +73,9 @@ export class Train {
       currentTrackId: this.currentTrackId,
       t: this.t, speed: this.speed, _baseSpeed: this._baseSpeed,
       direction: this.direction,
-      route: [...this.route], routeIndex: this.routeIndex,
+      // Deep-copy each RouteStep (plain object); handles both new and legacy formats
+      route: this.route.map(s => (s && typeof s === 'object') ? { ...s } : s),
+      routeIndex: this.routeIndex,
       running: this.running, carriages: this.carriages,
       x: this.x, y: this.y, angle: this.angle,
       stationStops: this.stationStops.map(s => ({ ...s })),
@@ -89,10 +100,10 @@ export class Train {
     this.collided = false;
     this.collidedWith = null;
     this.speed = this._baseSpeed;
-    this.running = false; // user must re-start
+    this.running = false;
   }
 
-  /** Update train position based on current track */
+  /** Update train world position from current track + t */
   updatePosition(track) {
     if (!track) return;
     const p = track.getPointAt(this.t);
@@ -104,17 +115,34 @@ export class Train {
   }
 
   /**
+   * Resolve the current route element as a RouteStep object.
+   * Returns null if no route, route is exhausted, or element is a legacy string.
+   * @returns {RouteStep|null}
+   */
+  _currentStep() {
+    const raw = this.route.length > 0 ? this.route[this.routeIndex] : null;
+    return (raw && typeof raw === 'object' && 'toT' in raw) ? raw : null;
+  }
+
+  /**
    * Advance the train by delta time.
-   * @param {number} dt          - elapsed seconds
-   * @param {Map}    tracks      - all Track objects
-   * @param {Map}    [junctions] - all Junction objects (optional); used to auto-switch
-   *                               the physical junction at each track transition so the
-   *                               train visually and logically takes the correct branch.
+   *
+   * With RouteStep routes (new format):
+   *   • Reads direction, fromT, toT from the current step — no guessing.
+   *   • On step completion, loads next step with its exact fromT and direction.
+   *   • Switches junctions between steps via _switchJunctionForTransition().
+   *
+   * With legacy string routes or no route:
+   *   • Runs to the end of the current track and stops (safe fallback).
+   *
+   * @param {number} dt          elapsed seconds
+   * @param {Map}    tracks      all Track objects
+   * @param {Map}    [junctions] all Junction objects (optional)
    */
   advance(dt, tracks, junctions = null) {
     if (!this.running || !this.currentTrackId || this.collided) return;
 
-    // Dwell at station
+    // ── Dwell at station ──
     if (this.dwelling) {
       this.dwellTimeRemaining -= dt;
       if (this.dwellTimeRemaining <= 0) {
@@ -125,109 +153,146 @@ export class Train {
       return;
     }
 
-    const track = tracks.get(this.currentTrackId);
-    if (!track) return;
+    const step = this._currentStep();
 
-    const trackLen = track.getLength();
-    if (trackLen === 0) return;
+    if (step) {
+      // ════════════════════════════════════════
+      //  DIRECTIONAL ROUTESTEP PATH (new format)
+      // ════════════════════════════════════════
+      //
+      // Direction is authoritative from the step — NO nearest-endpoint guessing.
+      // The train moves exactly from step.fromT to step.toT.
 
-    const dtParam = (this.speed * dt) / trackLen;
-    this.t += dtParam * this.direction;
+      this.direction = step.direction; // always in sync with the route step
 
-    // ── Reached the END of the current track (t >= 1, moving forward) ──
-    // t=1 always means the physical end of the track (track.end point).
-    if (this.t >= 1) {
-      this.t = 1;
+      const track = tracks.get(step.trackId);
+      if (!track) return;
+
+      const trackLen = track.getLength();
+      if (trackLen === 0) return;
+
+      const dtParam = (this.speed * dt) / trackLen;
+      this.t += dtParam * step.direction;
+
+      // Step complete?
+      const stepDone = step.direction === 1
+        ? this.t >= step.toT
+        : this.t <= step.toT;
+
+      if (stepDone) {
+        this.t = step.toT;           // clamp exactly to target
+        this.updatePosition(track);
+
+        const prevTrackId = step.trackId;
+        this.routeIndex++;
+        const nextRaw  = this.route[this.routeIndex];
+        const nextStep = (nextRaw && typeof nextRaw === 'object' && 'toT' in nextRaw)
+          ? nextRaw : null;
+
+        if (nextStep) {
+          // Switch junction so the physical switch aligns with the route
+          if (junctions) {
+            this._switchJunctionForTransition(junctions, prevTrackId, nextStep.trackId);
+          }
+
+          // Load next step — exact fromT and direction, no guessing
+          this.currentTrackId = nextStep.trackId;
+          this.t              = nextStep.fromT;
+          this.direction      = nextStep.direction;
+
+          const nextTrack = tracks.get(this.currentTrackId);
+          if (nextTrack) this.updatePosition(nextTrack);
+        } else {
+          // End of route — stop cleanly
+          this.running = false;
+        }
+        return;
+      }
+
       this.updatePosition(track);
 
-      if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
-        const exitPoint = track.end;  // t=1 → always at track.end
-        const prevTrackId = this.currentTrackId;
-        this.routeIndex++;
-        const nextTrackId = this.route[this.routeIndex];
+    } else {
+      // ════════════════════════════════════════
+      //  LEGACY / NO-ROUTE PATH (safe fallback)
+      // ════════════════════════════════════════
+      //
+      // Either the route is empty, exhausted, or in old string format.
+      // Just run to the physical end of the current track and stop.
+      // Users with old saves should reconfigure their route to get
+      // the full directional behaviour.
 
-        // Switch junction at this fork to align with the route
-        if (junctions) {
-          this._switchJunctionForTransition(junctions, prevTrackId, nextTrackId);
-        }
+      const track = tracks.get(this.currentTrackId);
+      if (!track) return;
 
-        this.currentTrackId = nextTrackId;
-        const nextTrack = tracks.get(this.currentTrackId);
+      const trackLen = track.getLength();
+      if (trackLen === 0) return;
 
-        if (nextTrack) {
-          // Determine which end of the next track is closest to our exit point
-          const dToStart = Math.hypot(exitPoint.x - nextTrack.start.x, exitPoint.y - nextTrack.start.y);
-          const dToEnd   = Math.hypot(exitPoint.x - nextTrack.end.x,   exitPoint.y - nextTrack.end.y);
+      const dtParam = (this.speed * dt) / trackLen;
+      this.t += dtParam * this.direction;
 
-          if (dToStart <= dToEnd) {
-            this.t = 0;
-            this.direction = 1;   // enter at start → travel forward
-          } else {
-            this.t = 1;
-            this.direction = -1;  // enter at end → travel backward
-          }
-          this.updatePosition(nextTrack);
-        }
-      } else {
-        // End of configured route — stop cleanly
-        this.running = false;
+      if (this.t >= 1) {
         this.t = 1;
+        this.updatePosition(track);
+        // Attempt to follow legacy string route entries if present
+        if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
+          const exitPt = track.end;
+          const prevId = this.currentTrackId;
+          this.routeIndex++;
+          const nextId = typeof this.route[this.routeIndex] === 'string'
+            ? this.route[this.routeIndex] : null;
+          if (nextId) {
+            if (junctions) this._switchJunctionForTransition(junctions, prevId, nextId);
+            this.currentTrackId = nextId;
+            const nextTrack = tracks.get(nextId);
+            if (nextTrack) {
+              const dS = Math.hypot(exitPt.x - nextTrack.start.x, exitPt.y - nextTrack.start.y);
+              const dE = Math.hypot(exitPt.x - nextTrack.end.x,   exitPt.y - nextTrack.end.y);
+              this.t         = dS <= dE ? 0 : 1;
+              this.direction = dS <= dE ? 1 : -1;
+              this.updatePosition(nextTrack);
+            }
+          } else { this.running = false; }
+        } else { this.running = false; }
+        return;
       }
-      return;
-    }
 
-    // ── Reached the START of the current track (t <= 0, moving backward) ──
-    // t=0 always means the physical start of the track (track.start point).
-    if (this.t <= 0) {
-      this.t = 0;
-      this.updatePosition(track);
-
-      if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
-        const exitPoint = track.start;  // t=0 → always at track.start
-        const prevTrackId = this.currentTrackId;
-        this.routeIndex++;
-        const nextTrackId = this.route[this.routeIndex];
-
-        // Switch junction at this fork to align with the route
-        if (junctions) {
-          this._switchJunctionForTransition(junctions, prevTrackId, nextTrackId);
-        }
-
-        this.currentTrackId = nextTrackId;
-        const nextTrack = tracks.get(this.currentTrackId);
-
-        if (nextTrack) {
-          const dToStart = Math.hypot(exitPoint.x - nextTrack.start.x, exitPoint.y - nextTrack.start.y);
-          const dToEnd   = Math.hypot(exitPoint.x - nextTrack.end.x,   exitPoint.y - nextTrack.end.y);
-
-          if (dToStart <= dToEnd) {
-            this.t = 0;
-            this.direction = 1;
-          } else {
-            this.t = 1;
-            this.direction = -1;
-          }
-          this.updatePosition(nextTrack);
-        }
-      } else {
-        // End of configured route — stop cleanly
-        this.running = false;
+      if (this.t <= 0) {
         this.t = 0;
+        this.updatePosition(track);
+        if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
+          const exitPt = track.start;
+          const prevId = this.currentTrackId;
+          this.routeIndex++;
+          const nextId = typeof this.route[this.routeIndex] === 'string'
+            ? this.route[this.routeIndex] : null;
+          if (nextId) {
+            if (junctions) this._switchJunctionForTransition(junctions, prevId, nextId);
+            this.currentTrackId = nextId;
+            const nextTrack = tracks.get(nextId);
+            if (nextTrack) {
+              const dS = Math.hypot(exitPt.x - nextTrack.start.x, exitPt.y - nextTrack.start.y);
+              const dE = Math.hypot(exitPt.x - nextTrack.end.x,   exitPt.y - nextTrack.end.y);
+              this.t         = dS <= dE ? 0 : 1;
+              this.direction = dS <= dE ? 1 : -1;
+              this.updatePosition(nextTrack);
+            }
+          } else { this.running = false; }
+        } else { this.running = false; }
+        return;
       }
-      return;
-    }
 
-    this.updatePosition(track);
+      this.updatePosition(track);
+    }
   }
 
   /**
-   * Find the junction that governs the transition from fromTrackId → toTrackId
-   * and set its activeRoute to match. This makes the junction physically switch
-   * to the correct branch so the visual state reflects where the train is going.
-   *
-   * Skips junctions that are in manual-override mode.
+   * Find the junction governing the transition fromTrackId → toTrackId
+   * and set its activeRoute. Makes the junction physically switch to the
+   * correct branch so the visual state matches the train's route.
+   * Skips junctions in manual-override mode.
    */
   _switchJunctionForTransition(junctions, fromTrackId, toTrackId) {
+    if (fromTrackId === toTrackId) return; // same track (e.g. dwell segment) — no switch needed
     for (const [, junction] of junctions) {
       if (junction.manualOverride) continue;
       if (
@@ -235,7 +300,7 @@ export class Train {
         junction.connectedTrackIds.includes(toTrackId)
       ) {
         junction.activeRoute = [fromTrackId, toTrackId];
-        return; // Only one junction can govern a single transition
+        return;
       }
     }
   }
@@ -244,6 +309,34 @@ export class Train {
   startDwell(dwellSeconds = 3) {
     this.dwelling = true;
     this.dwellTimeRemaining = dwellSeconds;
+  }
+
+  /**
+   * Debug helper — log the full route to the browser console.
+   * Usage: (from DevTools) window.app.trains.values().next().value.debugRoute()
+   */
+  debugRoute() {
+    if (!this.route.length) {
+      console.log(`%c${this.name}: No route configured`, 'color: orange; font-weight: bold');
+      return;
+    }
+    const first = this.route[0];
+    const isRouteStep = first && typeof first === 'object' && 'toT' in first;
+    if (!isRouteStep) {
+      console.log(`%c${this.name}: Legacy string route (${this.route.length} tracks) — reconfigure route to enable directional tracking`, 'color: gray');
+      return;
+    }
+    console.group(`%c${this.name} ROUTE — ${this.route.length} steps`, 'color: #4e8cff; font-weight: bold');
+    for (let i = 0; i < this.route.length; i++) {
+      const s   = this.route[i];
+      const dir = s.direction === 1 ? '→ fwd' : '← rev';
+      const cur = i === this.routeIndex ? ' ◄ CURRENT' : '';
+      console.log(
+        `[${i}] %c${s.trackId.slice(0, 8)}…%c  t: ${s.fromT.toFixed(3)} → ${s.toT.toFixed(3)}  ${dir}${cur}`,
+        'color: #22c55e', 'color: inherit'
+      );
+    }
+    console.groupEnd();
   }
 
   /** Hit-test */
@@ -275,7 +368,6 @@ export class Train {
       ctx.shadowColor = `rgba(239, 68, 68, ${pulse})`;
       ctx.shadowBlur = 20 / zoom;
 
-      // Red outline
       ctx.strokeStyle = `rgba(239, 68, 68, ${0.6 + pulse * 0.4})`;
       ctx.lineWidth = 3 / zoom;
       const totalW = locoW + this.carriages * (carriageW + gap) + 10;
