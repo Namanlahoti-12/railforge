@@ -11,6 +11,7 @@ export class SimulationEngine {
     this._time = 0;
     this._collisionNotified = false;
     this._stationProximityMap = new Map(); // trainId → stationId (for dwell tracking)
+    this._signalWaitMap = new Map();       // trainId → { signalId, waitRemaining }
   }
 
   get time() { return this._time; }
@@ -27,7 +28,7 @@ export class SimulationEngine {
 
     this.playing = true;
     for (const [, train] of this.app.trains) {
-      if (train.currentTrackId && !train.collided) {
+      if (train.currentTrackId && !train.collided && !train.destinationReached) {
         train.running = true;
       }
     }
@@ -43,12 +44,15 @@ export class SimulationEngine {
 
   stop() {
     this.playing = false;
+    this._signalWaitMap.clear();
     for (const [, train] of this.app.trains) {
       train.running = false;
       train.routeIndex = 0;
       train.dwelling = false;
       train.dwellTimeRemaining = 0;
       train.currentStopIndex = 0;
+      train.destinationReached = false;
+      train._stoppedBySignal = false;
 
       // Reset position from first route step (RouteStep or legacy string)
       if (train.route.length > 0) {
@@ -168,22 +172,145 @@ export class SimulationEngine {
       }
     }
 
-    // Second pass: advance trains — pass junctions so they can be auto-switched
+    // Second pass: apply signal constraints, then advance trains
     for (const train of trainArr) {
-      if (!train.collided) {
-        train.advance(dt, this.app.tracks, this.app.junctions);
+      if (train.collided || train.destinationReached) continue;
+
+      // ── Signal Enforcement ──
+      const signalInfo = this._getNearestSignalAhead(train);
+      const STOP_DISTANCE_PX = 18;  // Stop right in front of the signal post
+      const DECEL_DISTANCE_PX = 130; // Begin slowing down within this distance
+
+      if (signalInfo) {
+        const { state, dist } = signalInfo;
+
+        if (state === 'red') {
+          if (dist <= STOP_DISTANCE_PX) {
+            // Train has reached the signal post: full stop right in front of it
+            train.running = false;
+            train._stoppedBySignal = true;
+            continue;
+          } else if (dist <= DECEL_DISTANCE_PX) {
+            // Approaching red signal: smoothly decelerate towards the stop point
+            const progress = (dist - STOP_DISTANCE_PX) / (DECEL_DISTANCE_PX - STOP_DISTANCE_PX);
+            const factor = Math.max(0.18, Math.min(1.0, progress));
+            train.speed = Math.max(10, train._baseSpeed * factor);
+          }
+        } else if (state === 'yellow') {
+          // Yellow light: slow down to cautious cruising speed (40% base speed)
+          train.speed = Math.max(12, train._baseSpeed * 0.4);
+          if (train._stoppedBySignal && !train.destinationReached && !train.dwelling && this.playing) {
+            train.running = true;
+            train._stoppedBySignal = false;
+          }
+        } else if (state === 'green') {
+          // Green light: restore normal speed and resume if stopped by signal
+          if (train.speed < train._baseSpeed && !train.dwelling) {
+            train.speed = train._baseSpeed;
+          }
+          if (train._stoppedBySignal && !train.destinationReached && !train.dwelling && this.playing) {
+            train.running = true;
+            train._stoppedBySignal = false;
+          }
+        }
+      } else {
+        // No signal ahead: restore normal speed and resume if previously stopped by signal
+        if (train.speed < train._baseSpeed && !train.dwelling) {
+          train.speed = train._baseSpeed;
+        }
+        if (train._stoppedBySignal && !train.destinationReached && !train.dwelling && this.playing) {
+          train.running = true;
+          train._stoppedBySignal = false;
+        }
+      }
+
+      train.advance(dt, this.app.tracks, this.app.junctions);
+    }
+  }
+
+  /**
+   * Find the nearest signal ahead on the train's route / track path.
+   * Calculates actual track distance ahead along the direction of travel.
+   *
+   * @returns {{ signal: Signal, state: string, dist: number } | null}
+   */
+  _getNearestSignalAhead(train) {
+    if (!this.app.signals || this.app.signals.size === 0) return null;
+    if (!train.currentTrackId) return null;
+
+    const track = this.app.tracks.get(train.currentTrackId);
+    if (!track) return null;
+
+    const trackLen = track.getLength() || 100;
+    const step = train._currentStep();
+    const direction = step ? step.direction : train.direction;
+
+    let nearest = null;
+    let minDist = Infinity;
+
+    for (const [, signal] of this.app.signals) {
+      if (!signal.trackId) continue;
+
+      let dist = Infinity;
+
+      // Case 1: Signal is on the train's current track ahead
+      if (signal.trackId === train.currentTrackId) {
+        const deltaT = direction === 1 
+          ? (signal.trackT - train.t) 
+          : (train.t - signal.trackT);
+
+        if (deltaT > 0.005) { // strictly ahead
+          dist = deltaT * trackLen;
+        }
+      } 
+      // Case 2: Signal is on the next track in the train's active route
+      else if (train.route.length > 0 && train.routeIndex < train.route.length - 1) {
+        const nextItem = train.route[train.routeIndex + 1];
+        const nextTrackId = nextItem && typeof nextItem === 'object' ? nextItem.trackId : nextItem;
+        if (nextTrackId === signal.trackId) {
+          const nextTrack = this.app.tracks.get(nextTrackId);
+          const nextTrackLen = nextTrack?.getLength() || 100;
+          const nextDir = (nextItem && typeof nextItem === 'object') ? nextItem.direction : 1;
+
+          const remOnCur = direction === 1 ? (1 - train.t) * trackLen : train.t * trackLen;
+          const distOnNext = nextDir === 1 ? signal.trackT * nextTrackLen : (1 - signal.trackT) * nextTrackLen;
+          if (remOnCur >= 0 && distOnNext >= 0) {
+            dist = remOnCur + distOnNext;
+          }
+        }
+      }
+
+      // Case 3: Proximity fallback (within 130px and located in front of train)
+      if (dist === Infinity) {
+        const dx = signal.x - train.x;
+        const dy = signal.y - train.y;
+        const euclidDist = Math.sqrt(dx * dx + dy * dy);
+        const headingX = Math.cos(train.angle);
+        const headingY = Math.sin(train.angle);
+        const dot = (dx * headingX + dy * headingY);
+        if (dot > 0 && euclidDist < 130) {
+          dist = euclidDist;
+        }
+      }
+
+      if (dist < minDist && dist < 200) {
+        minDist = dist;
+        nearest = { signal, state: signal.state, dist };
       }
     }
+
+    return nearest;
   }
 
   // ─── Feature 4: Station Stop Checking ──────────────────────
 
   _checkStationStops() {
     for (const [, train] of this.app.trains) {
-      if (!train.running || train.collided || train.dwelling) continue;
+      if (!train.running || train.collided || train.dwelling || train.destinationReached) continue;
       if (train.stationStops.length === 0) continue;
       if (train.currentStopIndex >= train.stationStops.length) continue;
 
+      const isLastStop = train.currentStopIndex === train.stationStops.length - 1;
       const nextStop = train.stationStops[train.currentStopIndex];
       const station = this.app.stations.get(nextStop?.stationId);
       if (!station) continue;
@@ -211,9 +338,19 @@ export class SimulationEngine {
           }
         }
 
-        // Start dwell (3 seconds fixed)
-        train.startDwell(3);
-        this.app.notify?.(`🚉 ${train.name} arrived at ${station.name} (${platformId || 'P?'})`, 'info');
+        if (isLastStop) {
+          // Final station destination reached: stop permanently, do not go anywhere else
+          train.running = false;
+          train.destinationReached = true;
+          train.dwelling = false;
+          train.dwellTimeRemaining = 0;
+          train.currentStopIndex = train.stationStops.length;
+          this.app.notify?.(`🏁 ${train.name} reached final destination: ${station.name} (${platformId || 'P?'})! Stopped at terminus.`, 'success');
+        } else {
+          // Intermediate station stop: dwell for 3 seconds, then proceed
+          train.startDwell(3);
+          this.app.notify?.(`🚉 ${train.name} arrived at ${station.name} (${platformId || 'P?'})`, 'info');
+        }
       }
     }
 

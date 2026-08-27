@@ -63,6 +63,9 @@ export class Train {
     // ── Station→RouteIndex map (debug hint; proximity detection is authoritative) ──
     this.stationSegmentMap = data.stationSegmentMap || {};
 
+    // ── Destination / Terminus state ──
+    this.destinationReached = data.destinationReached ?? false;
+
     // Headlight flicker
     this._headlightPhase = Math.random() * Math.PI * 2;
   }
@@ -87,6 +90,7 @@ export class Train {
       dwellTimeRemaining: this.dwellTimeRemaining,
       assignedPlatform: this.assignedPlatform,
       stationSegmentMap: { ...this.stationSegmentMap },
+      destinationReached: this.destinationReached,
     };
   }
 
@@ -101,6 +105,7 @@ export class Train {
     this.collidedWith = null;
     this.speed = this._baseSpeed;
     this.running = false;
+    this.destinationReached = false;
   }
 
   /** Update train world position from current track + t */
@@ -140,7 +145,7 @@ export class Train {
    * @param {Map}    [junctions] all Junction objects (optional)
    */
   advance(dt, tracks, junctions = null) {
-    if (!this.running || !this.currentTrackId || this.collided) return;
+    if (!this.running || !this.currentTrackId || this.collided || this.destinationReached) return;
 
     // ── Dwell at station ──
     if (this.dwelling) {
@@ -149,6 +154,12 @@ export class Train {
         this.dwelling = false;
         this.dwellTimeRemaining = 0;
         this.currentStopIndex++;
+        // If this was the last station stop, stop permanently at the destination!
+        if (this.stationStops.length > 0 && this.currentStopIndex >= this.stationStops.length) {
+          this.running = false;
+          this.destinationReached = true;
+          return;
+        }
       }
       return;
     }
@@ -203,8 +214,9 @@ export class Train {
           const nextTrack = tracks.get(this.currentTrackId);
           if (nextTrack) this.updatePosition(nextTrack);
         } else {
-          // End of route — stop cleanly
+          // End of route — stop cleanly at final destination
           this.running = false;
+          this.destinationReached = true;
         }
         return;
       }
@@ -212,12 +224,12 @@ export class Train {
       this.updatePosition(track);
 
     } else {
-      // ════════════════════════════════════════
-      //  LEGACY / NO-ROUTE PATH (safe fallback)
-      // ════════════════════════════════════════
-      //
-      // Either the route is empty, exhausted, or in old string format.
-      // Just run to the physical end of the current track and stop.
+      // If the train already had a multi-step route and completed it, do NOT run down arbitrary tracks
+      if (this.route.length > 0 && this.routeIndex >= this.route.length) {
+        this.running = false;
+        this.destinationReached = true;
+        return;
+      }
       // Users with old saves should reconfigure their route to get
       // the full directional behaviour.
 
@@ -491,6 +503,16 @@ export class Train {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(`⏱ ${Math.ceil(this.dwellTimeRemaining)}s`, 0, locoH/2 + 6);
+    }
+
+    // Destination Reached badge
+    if (this.destinationReached && !this.collided) {
+      const destFontSize = Math.max(7, 9 / Math.sqrt(zoom));
+      ctx.font = `600 ${destFontSize}px Inter, sans-serif`;
+      ctx.fillStyle = '#22c55e';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText('🏁 Terminus', 0, locoH/2 + 6);
     }
 
     // Collision badge

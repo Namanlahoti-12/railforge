@@ -1403,6 +1403,8 @@ document.getElementById('route-save-btn')?.addEventListener('click', () => {
   train.direction         = firstStep.direction; // from PathFinder, not hardcoded
   train.running           = false;               // user presses Play to start
   train.currentStopIndex  = 0;
+  train.destinationReached = false;
+  train._stoppedBySignal  = false;
 
   const startTrack = app.tracks.get(firstStep.trackId);
   if (startTrack) train.updatePosition(startTrack);
