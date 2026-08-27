@@ -1,6 +1,7 @@
 /**
  * Train — data model and rendering for a train moving along tracks.
- * v2: Added stationStops routing, priority system, collision state, dwell timer.
+ * v5: Fixed advance() exit-point logic, added junction auto-switching so trains
+ *     physically follow configured timetable routes through forks/branches.
  */
 
 const TRAIN_COLORS = [
@@ -102,8 +103,15 @@ export class Train {
     if (this.direction === -1) this.angle += Math.PI;
   }
 
-  /** Advance the train by delta time */
-  advance(dt, tracks) {
+  /**
+   * Advance the train by delta time.
+   * @param {number} dt          - elapsed seconds
+   * @param {Map}    tracks      - all Track objects
+   * @param {Map}    [junctions] - all Junction objects (optional); used to auto-switch
+   *                               the physical junction at each track transition so the
+   *                               train visually and logically takes the correct branch.
+   */
+  advance(dt, tracks, junctions = null) {
     if (!this.running || !this.currentTrackId || this.collided) return;
 
     // Dwell at station
@@ -126,57 +134,71 @@ export class Train {
     const dtParam = (this.speed * dt) / trackLen;
     this.t += dtParam * this.direction;
 
-    // Reached the END of the current track (t >= 1)
+    // ── Reached the END of the current track (t >= 1, moving forward) ──
+    // t=1 always means the physical end of the track (track.end point).
     if (this.t >= 1) {
       this.t = 1;
       this.updatePosition(track);
 
       if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
-        // Move to the next track in the route
-        const exitPoint = this.direction === 1 ? track.end : track.start;
+        const exitPoint = track.end;  // t=1 → always at track.end
+        const prevTrackId = this.currentTrackId;
         this.routeIndex++;
-        this.currentTrackId = this.route[this.routeIndex];
+        const nextTrackId = this.route[this.routeIndex];
+
+        // Switch junction at this fork to align with the route
+        if (junctions) {
+          this._switchJunctionForTransition(junctions, prevTrackId, nextTrackId);
+        }
+
+        this.currentTrackId = nextTrackId;
         const nextTrack = tracks.get(this.currentTrackId);
 
         if (nextTrack) {
-          // Determine which end of the next track connects to our exit point
+          // Determine which end of the next track is closest to our exit point
           const dToStart = Math.hypot(exitPoint.x - nextTrack.start.x, exitPoint.y - nextTrack.start.y);
-          const dToEnd = Math.hypot(exitPoint.x - nextTrack.end.x, exitPoint.y - nextTrack.end.y);
+          const dToEnd   = Math.hypot(exitPoint.x - nextTrack.end.x,   exitPoint.y - nextTrack.end.y);
 
           if (dToStart <= dToEnd) {
-            // We enter the next track at its start → move forward
             this.t = 0;
-            this.direction = 1;
+            this.direction = 1;   // enter at start → travel forward
           } else {
-            // We enter the next track at its end → move backward
             this.t = 1;
-            this.direction = -1;
+            this.direction = -1;  // enter at end → travel backward
           }
           this.updatePosition(nextTrack);
         }
       } else {
-        // End of route — stop the train (don't bounce)
+        // End of configured route — stop cleanly
         this.running = false;
         this.t = 1;
       }
       return;
     }
 
-    // Reached the START of the current track (t <= 0)
+    // ── Reached the START of the current track (t <= 0, moving backward) ──
+    // t=0 always means the physical start of the track (track.start point).
     if (this.t <= 0) {
       this.t = 0;
       this.updatePosition(track);
 
       if (this.route.length > 0 && this.routeIndex < this.route.length - 1) {
-        // When moving backwards (direction = -1), we exit at track.start
-        const exitPoint = this.direction === -1 ? track.start : track.end;
+        const exitPoint = track.start;  // t=0 → always at track.start
+        const prevTrackId = this.currentTrackId;
         this.routeIndex++;
-        this.currentTrackId = this.route[this.routeIndex];
+        const nextTrackId = this.route[this.routeIndex];
+
+        // Switch junction at this fork to align with the route
+        if (junctions) {
+          this._switchJunctionForTransition(junctions, prevTrackId, nextTrackId);
+        }
+
+        this.currentTrackId = nextTrackId;
         const nextTrack = tracks.get(this.currentTrackId);
 
         if (nextTrack) {
           const dToStart = Math.hypot(exitPoint.x - nextTrack.start.x, exitPoint.y - nextTrack.start.y);
-          const dToEnd = Math.hypot(exitPoint.x - nextTrack.end.x, exitPoint.y - nextTrack.end.y);
+          const dToEnd   = Math.hypot(exitPoint.x - nextTrack.end.x,   exitPoint.y - nextTrack.end.y);
 
           if (dToStart <= dToEnd) {
             this.t = 0;
@@ -188,7 +210,7 @@ export class Train {
           this.updatePosition(nextTrack);
         }
       } else {
-        // End of route — stop
+        // End of configured route — stop cleanly
         this.running = false;
         this.t = 0;
       }
@@ -196,6 +218,26 @@ export class Train {
     }
 
     this.updatePosition(track);
+  }
+
+  /**
+   * Find the junction that governs the transition from fromTrackId → toTrackId
+   * and set its activeRoute to match. This makes the junction physically switch
+   * to the correct branch so the visual state reflects where the train is going.
+   *
+   * Skips junctions that are in manual-override mode.
+   */
+  _switchJunctionForTransition(junctions, fromTrackId, toTrackId) {
+    for (const [, junction] of junctions) {
+      if (junction.manualOverride) continue;
+      if (
+        junction.connectedTrackIds.includes(fromTrackId) &&
+        junction.connectedTrackIds.includes(toTrackId)
+      ) {
+        junction.activeRoute = [fromTrackId, toTrackId];
+        return; // Only one junction can govern a single transition
+      }
+    }
   }
 
   /** Start dwelling at a station */

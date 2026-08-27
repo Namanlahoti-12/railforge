@@ -154,10 +154,10 @@ export class SimulationEngine {
       }
     }
 
-    // Second pass: advance trains
+    // Second pass: advance trains — pass junctions so they can be auto-switched
     for (const train of trainArr) {
       if (!train.collided) {
-        train.advance(dt, this.app.tracks);
+        train.advance(dt, this.app.tracks, this.app.junctions);
       }
     }
   }
